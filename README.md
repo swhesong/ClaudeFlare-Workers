@@ -1,473 +1,714 @@
+# 🤖 Claude API 代理服务 (Cloudflare Worker)
 
-# Claude API 代理 (Cloudflare Worker)
+<div align="center">
 
-这是一个部署在 Cloudflare Workers 上的 Claude API 代理服务。它通过管理一个 `sessionKey` 池，实现了对 Claude API 请求的负载均衡、自动故障转移和无缝上下文管理，并提供了一个简单易用的 Web 管理面板。
+![Claude Proxy Banner](https://img.shields.io/badge/Claude%20API-Proxy%20Service-blue?style=for-the-badge&logo=cloudflare&logoColor=white)
 
-**English**: This is a Claude API proxy service deployed on Cloudflare Workers. It manages a pool of `sessionKey` tokens to provide load balancing, automatic failover, and seamless context management for Claude API requests, complete with a user-friendly web UI.
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-orange?style=flat-square&logo=cloudflare)](https://workers.cloudflare.com/)
+[![Version](https://img.shields.io/badge/version-2.0.0-brightgreen?style=flat-square)](https://github.com/yourusername/claude-proxy)
+[![Status](https://img.shields.io/badge/status-Production%20Ready-success?style=flat-square)](https://github.com/yourusername/claude-proxy)
+
+> 🚀 **企业级** Claude API 代理服务，提供智能负载均衡、无缝上下文管理和自动故障转移
+
+[🎯 快速开始](#-快速开始) • [📚 完整文档](#-完整功能特性) • [💡 使用示例](#-使用示例) • [🛠️ 故障排除](#️-故障排除)
+
+</div>
 
 ---
 
-## ✨ 核心特性 (Core Features)
+## ⭐ 项目亮点
 
--   **🚀 高可用性 (High Availability)**: 当某个 `sessionKey` 失效、额度用尽或遇到错误时，系统会自动切换到下一个可用的 `sessionKey` 并重试，对用户完全透明。
--   **🧠 智能上下文管理 (Intelligent Context Management)**: 在 API 请求因 `sessionKey` 问题而需要切换时，系统能自动保存并恢复对话上下文，确保多轮对话的连续性，用户体验无中断。
--   **🔑 Token 池管理 (Token Pool Management)**: 支持 "公共" 和 "管理员" 两级 `sessionKey` 池。管理员 `sessionKey` 拥有更高的使用优先级。
--   **🖥️ Web 管理面板 (Web Management UI)**: 提供直观的 Web 界面，用于添加、删除、查看、验证和管理所有 `sessionKey`。
--   **🔐 安全加固 (Enhanced Security)**: 管理员面板由密码保护，密码通过 Cloudflare 的 Secrets 进行安全设置，避免硬编码。
--   **☁️ Serverless 架构 (Serverless Architecture)**: 无需管理服务器，轻松部署到 Cloudflare 的全球网络，享受高可用性和低延迟。
--   **📊 状态验证 (Status Validation)**: 可一键验证所有 `sessionKey` 的有效性，并清理无效的 `sessionKey`。
--   **⚙️ 兼容原生 API (Native API Compatible)**: 完全兼容原生 Claude Messages API 格式，可无缝替换 API 端点。
+<table>
+<tr>
+<td width="50%">
 
-## 🏗️ 架构图 (Architecture)
+### 🎯 **高可用性架构**
+- ✅ **智能负载均衡** - 多 Token 池自动轮换
+- ✅ **故障自愈** - Token 失效时自动切换
+- ✅ **零停机** - 对用户完全透明的切换
+- ✅ **全球部署** - Cloudflare 边缘网络
 
-```
-+-----------+        +--------------------------+        +--------------------+
-|           |        |                          |        |   Cloudflare KV    |
-|   User    |  --->  |   Cloudflare Worker      |  <---> |  (Session Keys &   |
-| (Client)  |        |  (API Proxy & Web UI)    |        | Conversation Ctx)  |
-|           |        |                          |        +--------------------+
-+-----------+        +------------+-------------+
-                                   |
-                                   | (Proxied Request w/ Valid Key)
-                                   v
-                         +---------------------+
-                         |                     |
-                         |  Claude Backend API |
-                         |                     |
-                         +---------------------+
-```
+</td>
+<td width="50%">
 
-# Claude API 代理服务 - 用户部署说明书
+### 🧠 **智能上下文管理**
+- ✅ **无缝对话** - 切换时保持对话连续性
+- ✅ **上下文恢复** - 自动保存/恢复会话状态
+- ✅ **智能合并** - 防止重复消息
+- ✅ **历史管理** - 7天自动清理机制
 
-📋 项目概述
+</td>
+</tr>
+<tr>
+<td width="50%">
 
-这是一个基于 Cloudflare Workers 的 Claude API 代理服务，支持：
+### 🔐 **企业级安全**
+- ✅ **双层权限** - 管理员/普通用户分离
+- ✅ **密码保护** - Cloudflare Secrets 加密存储
+- ✅ **输入验证** - 严格的数据校验
+- ✅ **安全日志** - 完整的操作审计
 
-🔄 自动 Session Key 轮换和管理
+</td>
+<td width="50%">
 
-💬 无缝上下文切换（对话不中断）
+### 🖥️ **直观管理界面**
+- ✅ **可视化面板** - 现代化 Web UI
+- ✅ **批量操作** - 一键验证/清理
+- ✅ **实时状态** - Token 健康状况监控
+- ✅ **分页展示** - 大量 Token 友好支持
 
-🛡️ 智能错误处理和重试机制
+</td>
+</tr>
+</table>
 
-👥 多用户 Token 池管理
+---
 
-🎯 完全兼容 Claude API 接口
+## 🚀 快速开始
 
-🚀 快速部署指南
+### 📋 前置要求
 
-第一步：准备 Cloudflare 环境
+| 要求 | 说明 |
+|------|------|
+| Cloudflare 账号 | 免费账号即可，[点击注册](https://dash.cloudflare.com/sign-up) |
+| Claude Session Keys | 至少 1 个有效的 `sk-ant-sid01-` 开头的密钥 |
+| 基础技能 | 会复制粘贴代码即可 🎯 |
 
-注册 Cloudflare 账号
+### ⚡ 一键部署
 
-访问 Cloudflare Dashboard
+<details>
+<summary><b>🔧 第一步：创建 Worker 项目</b></summary>
 
-注册并登录账号
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. 导航至 `Workers & Pages` → `Create application` → `Create Worker`
+3. 输入项目名称（如：`claude-api-proxy`）
+4. 点击 `Save and Deploy`
 
-创建 Workers 项目
+</details>
 
-进入 Workers & Pages 页面
+<details>
+<summary><b>💾 第二步：配置 KV 存储</b></summary>
 
-点击 Create application
-
-选择 Create Worker
-
-给项目起个名字（如：claude-api-proxy）
-
-第二步：配置 KV 存储
-
-创建 KV 命名空间
-
+```bash
 # 在 Cloudflare Dashboard 中操作
 Workers & Pages → KV → Create namespace
+```
 
-命名空间名称：SESSION_KEYS
+**创建命名空间：**
+- **名称：** `SESSION_KEYS`
+- **记录：** Namespace ID（后续需要）
 
-记录下创建的 Namespace ID
+**绑定到 Worker：**
+1. 进入 Worker 设置页面
+2. `Variables and Secrets` → `KV Namespace Bindings`
+3. 添加绑定：`SESSION_KEYS` → 选择刚创建的命名空间
 
-绑定 KV 到 Worker
+</details>
 
-在 Worker 设置页面找到 Variables and Secrets
+<details>
+<summary><b>🔐 第三步：配置环境变量</b></summary>
 
-添加 KV 绑定：
+在 Worker 的 `Variables and Secrets` 中添加：
 
-Variable name: SESSION_KEYS
+| 变量名 | 类型 | 值 | 说明 |
+|--------|------|-----|------|
+| `ADMIN_PASSWORD` | Environment Variable | `你的安全密码` | ⚠️ **必须修改** |
 
-KV namespace: 选择刚创建的命名空间
+> **🛡️ 安全提醒：** 请使用强密码，至少包含大小写字母、数字和特殊字符
 
-第三步：配置环境变量
+</details>
 
-在 Worker 的 Variables and Secrets 中添加：
+<details>
+<summary><b>📝 第四步：部署代码</b></summary>
 
-变量名
+1. 复制项目源码到 Worker 编辑器
+2. **必须修改** 以下配置：
 
-类型
-
-值
-
-说明
-
-ADMIN_PASSWORD
-
-Environment Variable
-
-你的管理员密码
-
-⚠️ 必须修改
-
-重要提醒：
-
-// 代码中的默认密码必须修改！
-ADMIN_PASSWORD: 'XXXX',  // ← 替换成你的安全密码
-
-第四步：部署代码
-
-复制完整代码
-
-将附件中的完整代码复制到 Worker 编辑器
-
-必须修改的配置项
-
-🔐 安全配置（必改）
-
+```javascript
 const CONFIG = {
-  // ⚠️ 必须修改管理员密码
-  ADMIN_PASSWORD: '你的强密码',  // 改成复杂的密码
-  
-  // 其他配置保持默认即可
-  CACHE_TTL: 60,
-  VALID_KEY_TTL: 300,
+  ADMIN_PASSWORD: '你的强密码',  // ⚠️ 替换默认密码
+  // 其他配置保持默认
+  CACHE_TTL: 300,
+  VALID_KEY_TTL: 3600,
   // ...
 }
+```
 
-🌐 API 端点配置（可选修改）
+3. 点击 `Save and Deploy`
 
+</details>
+
+### 🎉 部署完成！
+
+你的代理服务地址：`https://your-worker-name.your-subdomain.workers.dev`
+
+---
+
+## 📚 完整功能特性
+
+### 🎯 **智能 Token 管理**
+
+```mermaid
+graph TD
+    A[API 请求] --> B{当前 Token 可用？}
+    B -->|是| C[使用当前 Token]
+    B -->|否| D[自动切换到下一个 Token]
+    D --> E[保存当前上下文]
+    E --> F[使用新 Token 继续请求]
+    F --> G[恢复完整上下文]
+    G --> H[返回无缝响应]
+    C --> I[正常响应]
+    
+    style A fill:#e1f5fe
+    style H fill:#c8e6c9
+    style I fill:#c8e6c9
+```
+
+### 🔄 **自动切换机制**
+
+| 触发条件 | 系统行为 | 用户体验 |
+|----------|----------|----------|
+| Token 过期/失效 | 立即切换到下一个可用 Token | 对话无中断继续 |
+| 配额用尽 | 智能检测并自动轮换 | 感知不到任何异常 |
+| 网络错误 | 重试机制 + Token 切换 | 自动恢复，无需干预 |
+| 服务限流 | 负载均衡到其他 Token | 请求成功率接近 100% |
+
+### 🧠 **上下文管理系统**
+
+<table>
+<tr>
+<td width="50%">
+
+**智能上下文保存：**
+- 📝 自动保存完整对话历史
+- 🔄 Token 切换时无缝继续
+- 🎯 智能去重，避免重复消息
+- ⏰ 7天自动清理过期数据
+
+</td>
+<td width="50%">
+
+**会话状态管理：**
+- 💾 实时保存会话参数
+- 🔄 模型设置完整传承
+- 🎛️ 温度、长度等参数保持
+- 📊 请求统计和错误追踪
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🎮 使用示例
+
+### 📡 **API 调用**
+
+将你的 Claude API 端点替换为代理地址即可：
+
+```bash
+# 原始 Claude API
+https://api.anthropic.com/v1/messages
+
+# 替换为你的代理地址
+https://your-worker-name.your-subdomain.workers.dev/v1/messages
+```
+
+### 🐍 **Python 示例**
+
+```python
+import requests
+
+# 配置代理端点
+PROXY_URL = "https://your-worker-name.your-subdomain.workers.dev/v1/messages"
+
+def chat_with_claude(message):
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    data = {
+        "model": "claude-3-sonnet-20240229",
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "user", "content": message}
+        ],
+        "conversation_id": "my-conversation-001"  # 可选：指定会话ID
+    }
+    
+    response = requests.post(PROXY_URL, headers=headers, json=data)
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error: {response.status_code} - {response.text}")
+        return None
+
+# 使用示例
+result = chat_with_claude("你好，请介绍一下自己")
+print(result['content'][0]['text'])
+```
+
+### 🌐 **JavaScript/Node.js 示例**
+
+```javascript
+async function chatWithClaude(message, conversationId = null) {
+    const response = await fetch('https://your-worker-name.your-subdomain.workers.dev/v1/messages', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            model: 'claude-3-sonnet-20240229',
+            max_tokens: 1024,
+            messages: [
+                { role: 'user', content: message }
+            ],
+            conversation_id: conversationId || `conv-${Date.now()}`
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.content[0].text;
+}
+
+// 使用示例
+chatWithClaude('Hello, Claude!')
+    .then(response => console.log(response))
+    .catch(error => console.error('Error:', error));
+```
+
+### 📱 **流式响应示例**
+
+```javascript
+async function streamChat(message) {
+    const response = await fetch('https://your-worker-name.your-subdomain.workers.dev/v1/messages', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            model: 'claude-3-sonnet-20240229',
+            max_tokens: 1024,
+            stream: true,  // 启用流式响应
+            messages: [
+                { role: 'user', content: message }
+            ]
+        })
+    });
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') return;
+                
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.delta?.text) {
+                        process.stdout.write(parsed.delta.text);
+                    }
+                } catch (e) {
+                    // 忽略解析错误
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## 🛠️ 管理面板指南
+
+### 🏠 **主面板概览**
+
+访问：`https://your-domain/api`
+
+<table>
+<tr>
+<td width="33%">
+
+**📊 状态仪表板**
+- 当前活跃 Token
+- Token 来源标识
+- 总数统计
+- 健康状况
+
+</td>
+<td width="33%">
+
+**⚙️ 快速操作**
+- Token 管理入口
+- 快速切换功能
+- API 使用说明
+- 统计信息
+
+</td>
+<td width="33%">
+
+**📖 使用指南**
+- API 端点展示
+- 请求示例
+- 支持的功能
+- 兼容性说明
+
+</td>
+</tr>
+</table>
+
+### 🔑 **Token 管理**
+
+访问：`https://your-domain/tokens`
+
+#### 👥 **普通用户功能**
+- ✅ 添加普通用户 Session Keys
+- ✅ 查看所有普通 Keys（安全截断显示）
+- ✅ 一键复制 Keys 到剪贴板
+- ✅ 实时验证状态查看
+
+#### 🔧 **管理员功能**（需要密码）
+- ✅ 所有普通用户功能
+- ✅ 添加/删除管理员专属 Session Keys
+- ✅ 批量验证所有 Keys 有效性
+- ✅ 智能删除无效 Keys
+- ✅ 按类型清空或全量清空 Keys
+
+### 🔄 **快速切换**
+
+访问：`https://your-domain/token`
+
+- 🎯 下拉列表选择可用 Token
+- 🏷️ 清晰标识 Token 类型（管理员/普通）
+- ⚡ 一键切换当前活跃 Token
+- ✅ 实时反馈切换结果
+
+---
+
+## 🔐 Session Key 获取指南
+
+### 🌐 **方法一：浏览器获取**
+
+<details>
+<summary>点击展开详细步骤</summary>
+
+1. **登录 Claude.ai**
+   - 访问 https://claude.ai
+   - 使用你的账号登录
+
+2. **打开开发者工具**
+   - 按 `F12` 键
+   - 或右键 → "检查元素"
+
+3. **找到 Session Key**
+   - 切换到 `Application` 标签
+   - 展开 `Storage` → `Cookies` → `https://claude.ai`
+   - 找到 `sessionKey` 项
+   - 复制其值（以 `sk-ant-sid01-` 开头）
+
+</details>
+
+### 🔧 **方法二：抓包获取**
+
+<details>
+<summary>点击展开详细步骤</summary>
+
+1. **使用抓包工具**
+   - 推荐：Chrome DevTools、Fiddler、Charles
+   
+2. **监听网络请求**
+   - 登录 Claude.ai 后进行对话
+   - 监听对 `https://api.claude.ai` 的请求
+
+3. **提取 Session Key**
+   - 查看请求头中的 `Cookie` 字段
+   - 找到 `sessionKey=sk-ant-sid01-...` 部分
+   - 复制 `sk-ant-sid01-` 开头的完整字符串
+
+</details>
+
+### ⚠️ **Session Key 安全须知**
+
+| ⚠️ 警告 | 📋 说明 |
+|---------|---------|
+| **格式要求** | 必须以 `sk-ant-sid01-` 开头，长度通常为 100+ 字符 |
+| **有效期** | 通常为几个月，过期后需要重新获取 |
+| **安全性** | 相当于账号密码，切勿泄露给他人 |
+| **使用限制** | 受 Claude 账号类型限制（Free/Pro/Team） |
+
+---
+
+## ⚙️ 高级配置
+
+### 🎛️ **核心配置选项**
+
+```javascript
+const CONFIG = {
+  // 🔐 安全配置
+  ADMIN_PASSWORD: 'your-secure-password',    // ⚠️ 必须修改
+
+  // ⏰ 缓存配置
+  CACHE_TTL: 300,                            // 通用缓存时间（秒）
+  VALID_KEY_TTL: 3600,                       // 有效Key缓存时间（秒）
+
+  // 💬 上下文管理
+  CONTEXT_MANAGEMENT: {
+    ENABLED: true,                           // 启用上下文管理
+    MAX_CONTEXT_MESSAGES: 50,                // 最大上下文消息数
+    AUTO_CLEANUP_DAYS: 7,                    // 自动清理天数
+    SEAMLESS_SWITCH_ENABLED: true,           // 启用无缝切换
+    PRESERVE_CONVERSATION_STATE: true,       // 保持对话状态
+  },
+
+  // 🔄 自动切换
+  AUTO_SWITCH: {
+    ENABLED: true,                           // 启用自动切换
+    MAX_RETRY_ATTEMPTS: 10,                  // 最大重试次数
+    RETRY_DELAY_MS: 1000,                    // 重试延迟（毫秒）
+    SMART_ERROR_DETECTION: true              // 智能错误检测
+  },
+
+  // 📄 分页配置
+  ITEMS_PER_PAGE: 10,                        // 每页显示Token数量
+}
+```
+
+### 🌐 **API 端点配置**
+
+```javascript
 API_ENDPOINTS: {
   CLAUDE_OFFICIAL: 'https://api.claude.ai/api/organizations',
   CLAUDE_API: 'https://api.claude.ai',
-  FUCLAUDE_AUTH: 'https://demo.xxxx.com/api/auth/session',      // 如需更换
-  FUCLADUE_MESSAGES: 'https://demo.xxxx.com/v1/messages',      // 如需更换
-  FUCLAUDE_LOGIN: 'https://demo.xxxx.com/login_token'          // 如需更换
+  FUCLAUDE_AUTH: 'https://demo.fuclaude.com/api/auth/session',
+  FUCLAUDE_MESSAGES: 'https://demo.fuclaude.com/v1/messages',
+  FUCLAUDE_LOGIN: 'https://demo.fuclaude.com/login_token'
 }
+```
 
-保存并部署
+### 📊 **性能优化建议**
 
-点击 Save and Deploy
+| 配置项 | 推荐值 | 说明 |
+|--------|--------|------|
+| Token 数量 | 5-15 个 | 平衡可用性与管理复杂度 |
+| 缓存时间 | 300 秒 | 减少 KV 读取，提升响应速度 |
+| 上下文消息数 | 50 条 | 在功能性与存储成本间平衡 |
+| 重试次数 | 10 次 | 确保高可用性 |
 
-等待部署完成
+---
 
-⚙️ 初始配置
+## 📈 监控与日志
 
-获取你的代理地址
+### 📊 **实时监控**
 
-部署成功后，你会得到一个地址，格式如：
+在 Cloudflare Dashboard 中查看：
 
-https://your-worker-name.your-subdomain.workers.dev
+- **Real-time Logs**: 实时日志流
+- **Analytics**: 请求统计分析
+- **Performance**: 响应时间监控
+- **Errors**: 错误率追踪
 
-第一次使用
+### 🔍 **关键指标**
 
-访问管理面板
+| 指标 | 说明 | 正常范围 |
+|------|------|----------|
+| **成功率** | API 请求成功率 | > 99% |
+| **响应时间** | 平均响应延迟 | < 2000ms |
+| **Token 切换频率** | 每小时切换次数 | < 10 次 |
+| **上下文保存率** | 对话状态保存成功率 | > 95% |
 
-https://your-worker-name.your-subdomain.workers.dev/api
+### 📝 **日志类型**
 
-添加 Session Keys
+```javascript
+// 系统会自动记录以下日志类型：
+[INFO]  Token 切换事件: "Switched to next valid token: sk-ant-***"
+[WARN]  Token 失效警告: "Token invalid, trying next: sk-ant-***"
+[ERROR] API 请求错误: "All tokens validation failed"
+[DEBUG] 上下文操作: "Saved conversation context: conv-123"
+```
 
-点击 Token 管理
+---
 
-使用管理员密码登录
+## 🛠️ 故障排除
 
-批量添加你的 Claude Session Keys
+### ❓ **常见问题**
 
-🔑 Session Key 获取方法
+<details>
+<summary><b>❌ "No valid session keys found" 错误</b></summary>
 
-方法一：浏览器获取
+**症状：** 访问首页或 API 时报错
 
-登录 Claude.ai
+**原因分析：**
+- 所有 Session Keys 都已失效
+- 没有添加任何 Session Keys
+- KV 存储配置错误
 
-打开浏览器开发者工具（F12）
+**解决方案：**
+1. 检查 KV 命名空间是否正确绑定
+2. 添加至少 1 个有效的 Session Key
+3. 验证 Session Key 格式（必须以 `sk-ant-sid01-` 开头）
+4. 检查 Session Key 是否过期
 
-找到 Application/Storage → Cookies → https://claude.ai
+</details>
 
-复制 sessionKey 的值（以 sk-ant-sid01- 开头）
+<details>
+<summary><b>🔐 管理员密码错误</b></summary>
 
-方法二：抓包获取
+**症状：** 无法登录管理员功能
 
-使用抓包工具监听 Claude.ai 的请求
+**原因分析：**
+- 未修改代码中的默认密码
+- 输入密码与配置不匹配
+- 环境变量未正确设置
 
-在请求头中找到 Cookie 字段
+**解决方案：**
+1. 检查代码中 `CONFIG.ADMIN_PASSWORD` 的值
+2. 确认环境变量 `ADMIN_PASSWORD` 正确设置
+3. 清除浏览器 Cookie 后重新登录
 
-提取其中的 sessionKey=sk-ant-sid01-... 部分
+</details>
 
-⚠️ Session Key 注意事项
+<details>
+<summary><b>🌐 CORS 跨域错误</b></summary>
 
-Session Key 格式：必须以 sk-ant-sid01- 开头
+**症状：** 浏览器控制台报 CORS 错误
 
-有效期：通常为几个月，过期后需要重新获取
+**原因分析：**
+- 跨域请求被阻止
+- 请求头设置不正确
 
-安全性：不要泄露给他人，相当于你的账号密码
+**解决方案：**
+1. 代码已内置 CORS 处理，确保使用正确的请求格式
+2. 检查请求的 Content-Type 是否为 `application/json`
+3. 避免自定义不必要的请求头
 
-📝 使用说明
+</details>
 
-API 调用方式
+<details>
+<summary><b>💾 上下文切换失败</b></summary>
 
-将你的 Claude API 请求地址替换为：
+**症状：** Token 切换时丢失对话历史
 
-https://your-worker-name.your-subdomain.workers.dev/v1/messages
+**原因分析：**
+- KV 存储读写失败
+- 上下文数据过大
+- 网络超时
 
-示例代码
+**解决方案：**
+1. 检查 KV 命名空间绑定
+2. 减少 `MAX_CONTEXT_MESSAGES` 配置
+3. 检查 Cloudflare Workers 的使用量限制
 
-curl 请求
+</details>
 
-curl -X POST https://your-worker-name.your-subdomain.workers.dev/v1/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-3-sonnet-20240229",
-    "max_tokens": 1024,
-    "messages": [
-      {"role": "user", "content": "Hello, Claude!"}
-    ]
-  }'
+### 🔧 **诊断工具**
 
-Python 请求
+```javascript
+// 在浏览器控制台中运行以下代码进行诊断
 
-import requests
+// 1. 检查 API 连通性
+fetch('https://your-worker-name.workers.dev/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        model: 'claude-3-sonnet-20240229',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'test' }]
+    })
+}).then(r => console.log('Status:', r.status))
 
-url = "https://your-worker-name.your-subdomain.workers.dev/v1/messages"
-headers = {"Content-Type": "application/json"}
-data = {
-    "model": "claude-3-sonnet-20240229",
-    "max_tokens": 1024,
-    "messages": [
-        {"role": "user", "content": "Hello, Claude!"}
-    ]
-}
+// 2. 检查管理面板
+fetch('https://your-worker-name.workers.dev/api')
+  .then(r => r.text())
+  .then(html => console.log('Panel accessible:', html.includes('管理面板')))
+```
 
-response = requests.post(url, headers=headers, json=data)
-print(response.json())
+### 📞 **获取帮助**
 
-JavaScript 请求
+| 问题类型 | 解决渠道 |
+|----------|----------|
+| **部署相关** | [Cloudflare Workers 文档](https://developers.cloudflare.com/workers/) |
+| **Claude API** | [Anthropic 官方文档](https://docs.anthropic.com/) |
+| **KV 存储** | [Cloudflare KV 文档](https://developers.cloudflare.com/workers/runtime-apis/kv/) |
+| **代码问题** | [GitHub Issues](https://github.com/yourusername/claude-proxy/issues) |
 
-const response = await fetch('https://your-worker-name.your-subdomain.workers.dev/v1/messages', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    model: 'claude-3-sonnet-20240229',
-    max_tokens: 1024,
-    messages: [
-      { role: 'user', content: 'Hello, Claude!' }
-    ]
-  })
-});
+---
 
-const data = await response.json();
-console.log(data);
+## 🎯 部署检查清单
 
-🛠️ 管理功能
+在部署完成后，请按以下清单进行检查：
 
-访问管理面板
+### ✅ **基础配置检查**
 
-https://your-domain/api          # 主管理面板
-https://your-domain/tokens       # Token 管理
-https://your-domain/token        # 快速切换 Token
+- [ ] ✅ 已创建 Cloudflare Workers 项目
+- [ ] ✅ 已创建并绑定 KV 命名空间 `SESSION_KEYS`
+- [ ] ✅ 已修改默认管理员密码
+- [ ] ✅ 已设置环境变量 `ADMIN_PASSWORD`
+- [ ] ✅ 已成功部署代码到 Workers
 
-Token 管理功能
+### ✅ **功能测试检查**
 
-普通用户功能
+- [ ] ✅ 管理面板可正常访问 (`/api`)
+- [ ] ✅ Token 管理功能正常 (`/tokens`)
+- [ ] ✅ 已添加至少 1 个有效 Session Key
+- [ ] ✅ API 调用功能正常 (`/v1/messages`)
+- [ ] ✅ Token 自动切换功能正常
+- [ ] ✅ 上下文无缝切换功能正常
 
-✅ 添加普通用户 Session Keys
+### ✅ **安全检查**
 
-✅ 查看所有普通 Keys（截断显示）
+- [ ] ✅ 管理员密码已修改为强密码
+- [ ] ✅ Session Keys 来源安全可靠
+- [ ] ✅ 环境变量正确配置
+- [ ] ✅ 不包含任何硬编码敏感信息
 
-✅ 复制 Keys 到剪贴板
+### ✅ **性能监控**
 
-管理员功能（需要密码）
+- [ ] ✅ Cloudflare Analytics 正常记录
+- [ ] ✅ 实时日志功能正常
+- [ ] ✅ 响应时间在合理范围内（< 2秒）
+- [ ] ✅ 错误率在可接受范围内（< 1%）
 
-✅ 所有普通用户功能
+---
 
-✅ 添加/删除管理员 Session Keys
+## 📜 许可证
 
-✅ 批量验证所有 Keys 有效性
+本项目采用 MIT 许可证 - 详细信息请查看 [LICENSE](LICENSE) 文件。
 
-✅ 删除无效 Keys
+---
 
-✅ 清空指定类型或所有 Keys
+## 🙏 致谢
 
-Key 验证方式
+感谢以下项目和服务的支持：
 
-Fuclaude网站验证（推荐）
+- [Cloudflare Workers](https://workers.cloudflare.com/) - 无服务器计算平台
+- [Anthropic Claude](https://www.anthropic.com/) - 强大的 AI 助手
+- 所有贡献者和用户的宝贵反馈
 
-更快速、更可靠
+---
 
-通过第三方接口验证
+<div align="center">
 
-官方API验证
+### 🚀 现在就开始使用吧！
 
-直接调用 Claude 官方 API
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/yourusername/claude-proxy)
 
-可能受到限制
+**让 AI 对话更加流畅可靠** ✨
 
-🔄 自动切换机制
+---
 
-智能 Token 管理
+<sub>如果这个项目对你有帮助，请考虑给它一个 ⭐ Star</sub>
 
-🎯 优先级: 管理员 Token > 普通用户 Token
-
-🔄 自动轮换: Token 失效时自动切换到下一个可用 Token
-
-💾 上下文保持: 切换过程中完整保留对话历史
-
-🔁 重试机制: 最多重试 5 次，确保服务可用性
-
-无缝对话切换
-
-当聊天过程中 Token 用完时：
-
-系统自动检测到 Token 失效
-
-立即切换到下一个可用 Token
-
-完整保留之前的对话上下文
-
-用户感受不到任何中断
-
-对话无缝继续
-
-⚠️ 重要注意事项
-
-安全警告
-
-管理员密码: 务必修改默认密码 96582666Ss
-
-Session Key 安全: 不要在公共场所或不安全的网络环境下操作
-
-定期检查: 建议定期检查和更新失效的 Session Keys
-
-性能优化
-
-Token 数量: 建议维护 5-10 个有效 Session Keys
-
-缓存设置: 默认缓存 60 秒，可根据需要调整
-
-监控使用: 定期查看 Cloudflare Workers 的使用量
-
-使用限制
-
-Cloudflare Workers 限制:
-
-免费版：每天 100,000 次请求
-
-付费版：无限制
-
-Claude API 限制:
-
-取决于你的 Claude 账号类型和配额
-
-故障排除
-
-常见问题
-
-1. “No valid session keys found” 错误
-
-原因：所有 Session Keys 都已失效
-
-解决：添加新的有效 Session Keys
-
-2. 管理员密码错误
-
-原因：未修改默认密码或输入错误
-
-解决：检查代码中的 ADMIN_PASSWORD 设置
-
-3. CORS 错误
-
-原因：跨域请求问题
-
-解决：代码已内置 CORS 处理，确保请求格式正确
-
-4. 上下文切换失败
-
-原因：KV 存储未正确配置
-
-解决：检查 KV 命名空间绑定是否正确
-
-🔧 高级配置
-
-自定义配置选项
-
-const CONFIG = {
-  // 缓存设置
-  CACHE_TTL: 60,                    // 缓存时间（秒）
-  VALID_KEY_TTL: 300,              // 有效Key缓存时间（秒）
-  
-  // 上下文管理
-  CONTEXT_MANAGEMENT: {
-    MAX_CONTEXT_MESSAGES: 50,       // 最大上下文消息数
-    AUTO_CLEANUP_DAYS: 7,          // 自动清理天数
-    SEAMLESS_SWITCH_ENABLED: true, // 启用无缝切换
-  },
-  
-  // 自动切换
-  AUTO_SWITCH: {
-    ENABLED: true,                 // 启用自动切换
-    MAX_RETRY_ATTEMPTS: 5,         // 最大重试次数
-    RETRY_DELAY_MS: 1000,          // 重试延迟（毫秒）
-  },
-  
-  // 分页设置
-  ITEMS_PER_PAGE: 10,              // 每页显示的Token数量
-}
-
-监控和日志
-
-服务会自动记录详细日志，包括：
-
-Token 切换事件
-
-API 请求状态
-
-错误和重试信息
-
-上下文保存/恢复操作
-
-可以在 Cloudflare Dashboard 的 Real-time Logs 中查看。
-
-📞 技术支持
-
-常用链接
-
-Cloudflare Workers 文档
-
-Claude API 文档
-
-KV 存储文档
-
-更新和维护
-
-定期检查 Session Keys 的有效性
-
-监控 Cloudflare Workers 的使用量
-
-根据需要调整配置参数
-
-备份重要的配置和 Keys
-
-🎉 部署完成检查清单
-
- ✅ 已创建 Cloudflare Workers 项目
-
- ✅ 已创建并绑定 KV 命名空间 SESSION_KEYS
-
- ✅ 已修改默认管理员密码
-
- ✅ 已部署代码到 Workers
-
- ✅ 已获取至少 1 个有效的 Claude Session Key
-
- ✅ 已通过管理面板添加 Session Keys
-
- ✅ 已测试 API 调用功能
-
- ✅ 已测试上下文无缝切换功能
-
-完成以上步骤后，你的 Claude API 代理服务就可以正常使用了！享受无缝的 AI 对话体验吧！ 🚀
+</div>
