@@ -601,7 +601,7 @@
                 return;
             }
 
-            const maxPageStr = document.querySelector('.pagination')?.textContent.match(/(\\d+)\\s*$/)?.[1];
+            const maxPageStr = document.querySelector('.pagination')?.textContent.match(/(\d+)\s*$/)?.[1];
             const maxPage = maxPageStr ? parseInt(maxPageStr, 10) : Math.max(...Array.from(document.querySelectorAll('.pagination a, .pagination button')).map(el => parseInt(el.textContent.trim())).filter(n => !isNaN(n)), 1);
             log(`Detected total pages: ${maxPage}`);
             let allKeys = new Set();
@@ -632,7 +632,7 @@
             if (uniqueKeys.length === 0) throw new Error("No keys were scraped.");
 
             log(`Scraping completed! Found ${uniqueKeys.length} unique keys.`);
-            await GM_setValue(CONFIG.storageKeys.keys, uniqueKeys.join('\\n'));
+            await GM_setValue(CONFIG.storageKeys.keys, uniqueKeys.join('\n'));
             log("Keys saved. Preparing to start deployment process in new tab...");
             btn.style.backgroundColor = '#4CAF50';
             btn.textContent = 'Scraping completed';
