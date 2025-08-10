@@ -16,7 +16,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_openInTab
 // @license      MIT
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function() {
