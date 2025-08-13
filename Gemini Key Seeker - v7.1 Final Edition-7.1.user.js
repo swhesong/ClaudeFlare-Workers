@@ -203,7 +203,10 @@
         log(`Verification finished. Found ${validKeys.length} valid keys.`);
         btn.textContent = `验证完成! ${validKeys.length}个有效Key`;
         if (validKeys.length > 0) {
-            downloadKeys(validKeys);
+            // [修改] 调用增强的downloadKeys函数，并提供明确的文件名和提示信息
+            const filename = `keys_validated_${new Date().toISOString().slice(0, 10)}.txt`;
+            const alertMessage = `验证完成！共找到 ${validKeys.length} 个有效的Key。已开始下载【已验证】的Key文件。`;
+            downloadKeys(validKeys, filename, alertMessage);
         } else {
             safeAlert("验证完成，但未找到任何状态为200的有效Key。");
         }
@@ -259,26 +262,29 @@
         return maxPage;
     }
 
-    function downloadKeys(keys) {
+    function downloadKeys(keys, filename, alertMessage) { // [新增] 增加 filename 和 alertMessage 参数以实现复用
         try {
             const uniqueKeys = [...new Set(keys)];
-            log(`Processing download for ${uniqueKeys.length} unique keys`);
+            log(`Processing download for ${uniqueKeys.length} unique keys for file: ${filename}`);
 
             if (uniqueKeys.length === 0) {
-                safeAlert("任务完成，但未能抓取到任何Key。");
+                // [修改] 使其在 0 key 时不弹出提示，只记录日志，因为后续流程会处理
+                log("Download called with 0 keys. Aborting download for this step.");
                 return;
             }
 
             const fileContent = uniqueKeys.join('\n');
             const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
-            const filename = `keys_${new Date().toISOString().slice(0, 10)}.txt`;
 
             try {
                 GM_download({ url: URL.createObjectURL(blob), name: filename, saveAs: true });
-                log(`Download initiated successfully for ${uniqueKeys.length} keys`);
-                safeAlert(`抓取完成！共找到 ${uniqueKeys.length} 个唯一的Key。已开始下载。`);
+                log(`Download initiated successfully for ${filename}`);
+                // [修改] 使用传入的自定义提示信息
+                if (alertMessage) {
+                    safeAlert(alertMessage);
+                }
             } catch (downloadError) {
-                log(`Download failed: ${downloadError.message}`);
+                log(`Download failed for ${filename}: ${downloadError.message}`);
                 // 备用下载方式
                 const link = document.createElement('a');
                 link.href = URL.createObjectURL(blob);
@@ -286,13 +292,17 @@
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
-                safeAlert(`抓取完成！共找到 ${uniqueKeys.length} 个唯一的Key。使用备用方式下载。`);
+                // [修改] 使用传入的自定义提示信息
+                if (alertMessage) {
+                    safeAlert(alertMessage + ' (使用备用方式下载)');
+                }
             }
         } catch (error) {
             log(`Critical error in downloadKeys: ${error.message}`);
             safeAlert(`下载过程发生错误：${error.message}`);
         }
     }
+
 
     // --- 高级算法核心：优化的并发工作池 (World-Leading Algorithm for I/O-bound tasks) ---
     // 此函数采用现代并发模型（常被称为"Worker Pool"或"Semaphore"模式）来处理大量网络请求。
@@ -421,8 +431,15 @@
             const uniqueKeys = [...new Set(allKeys)];
             log(`Collection completed in ${duration}s. Found ${allKeys.length} total keys, ${uniqueKeys.length} unique keys.`);
             btn.textContent = `抓取完成! ${duration}s (${uniqueKeys.length}个Key)`;
-            // ---  修改点：抓取完成后，调用新的验证函数 ---
-            await verifyAndExportKeys(allKeys);
+            // --- 新增功能：在验证前，先下载所有抓取到的Key ---
+            if (uniqueKeys.length > 0) {
+                const unvalidatedFilename = `keys_unvalidated_${new Date().toISOString().slice(0, 10)}.txt`;
+                const unvalidatedAlert = `抓取完成！共找到 ${uniqueKeys.length} 个唯一的Key。\n\n已开始下载【未验证】的全部Key文件。\n接下来将自动开始验证过程...`;
+                downloadKeys(uniqueKeys, unvalidatedFilename, unvalidatedAlert);
+                await sleep(1000); // 短暂延迟，确保用户看到提示
+            }
+            // ---  调用验证函数 ---
+            await verifyAndExportKeys(uniqueKeys); // [优化] 传递uniqueKeys以避免重复计算
         } catch (error) {
             if (error.message === 'WAF_BLOCKED') {
                 safeAlert(`抓取过程中被防火墙拦截！\n建议：\n1. 等待几分钟后重试\n2. 降低并发数设置\n3. 增加延迟时间`);
