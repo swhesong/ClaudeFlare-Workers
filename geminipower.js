@@ -340,6 +340,15 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         }
       }
 
+      // 如果在这次流中成功输出了文本，即使最后因为网络问题等需要重试，
+      // 我们也重置连续失败计数器，因为这代表取得了进展，而不是完全卡死。
+      if (textInThisStream.length > 0) {
+        if (consecutiveRetryCount > 0) {
+            logInfo(`Progress was made in the last stream attempt. Resetting consecutive retry count from ${consecutiveRetryCount} to 0.`);
+        }
+        consecutiveRetryCount = 0;
+      }
+
       if (!cleanExit && interruptionReason === null) {
         logError("Stream ended without finish reason - detected as DROP");
         interruptionReason = "DROP";
