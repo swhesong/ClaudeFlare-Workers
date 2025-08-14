@@ -458,6 +458,23 @@ async function handleStreamingPost(request) {
 
   // system prompt inject
   const body = await request.json();
+  // 检查是否存在错误的蛇形命名，如果存在，则将其内容合并到正确的驼峰命名中
+  if (body.generation_config && typeof body.generation_config === 'object') {
+    logInfo("Detected incorrect 'generation_config' (snake_case) from client. Attempting to merge into 'generationConfig'.");
+    
+    // 如果正确的驼峰命名不存在，就创建一个
+    if (!body.generationConfig) {
+      body.generationConfig = {};
+    }
+    
+    // 将蛇形命名的属性合并到驼峰命名中，驼峰命名中的现有属性优先
+    Object.assign(body.generationConfig, { ...body.generation_config, ...body.generationConfig });
+    
+    // 删除错误的蛇形命名，确保请求的纯净性
+    delete body.generation_config;
+    logDebug("Successfully merged and deleted snake_case config.");
+  }
+  // =============================================================
   const newSystemPromptPart = {
           text: CONFIG.system_prompt_injection // 使用配置的系统指令
       };
