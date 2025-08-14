@@ -63,8 +63,7 @@
     const VERIFICATION_CONFIG = {
         // [最终解决方案] 内置一个包含多个最新可用代理的列表，以提高稳定性
         endpoints: [
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent',
-            'https://gemini.chiangma.com/v1beta/models/gemini-2.5-pro:generateContent'
+            'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent'
         ],
         model: 'gemini-2.5-pro',
         testPayload: {
@@ -153,7 +152,7 @@
         try {
             // Promise.race会返回第一个被解决(resolve)的promise的结果。
             // 这意味着只要有一个节点验证成功，我们就会立即得到结果。
-            return await Promise.race(promises);
+            return await Promise.any(promises);
         } catch (error) {
             // 只有当所有端点的尝试都失败时（例如，全部超时、网络错误、非200状态），才会进入此块。
             log(`Key ${key.substring(0, 12)}... FAILED on all endpoints.`);
