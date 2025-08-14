@@ -76,7 +76,7 @@
                 "temperature": 0.1
             }
         },
-        concurrentRequests: 15,
+        concurrentRequests: 8,
         requestTimeout: 8000,
     };
 
