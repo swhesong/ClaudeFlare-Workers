@@ -522,7 +522,7 @@ class RecoveryStrategist {
   isLikelyContentIssue() {
     // ============ 国际先进算法：多维度内容问题智能识别引擎 ============
 
-    // 新增 - 最高优先级规则 (灵感源于附件代码2)：对审查的即时反应
+    // 新增 - 最高优先级规则 (灵感源于)：对审查的即时反应
     if (this.retryHistory.length > 0) {
         const lastReason = this.retryHistory[this.retryHistory.length - 1].reason;
         if (lastReason === "FINISH_SAFETY" || lastReason === "BLOCK") {
@@ -787,8 +787,8 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 
         const { text: textChunk, isThought, payload } = parseLineContent(line);
 
-        // ============ 终极Payload有效性防御层 (灵感源于附件代码2的健壮性) ============
-        // 这是对附件代码2亮点的升华。我们不仅防御JSON解析失败，
+        // ============ 终极Payload有效性防御层 (灵感源于的健壮性) ============
+        // 我们不仅防御JSON解析失败，
         // 而且确保只有结构完整的payload才能进入后续的智能分析和状态更新。
         if (!payload) {
             logWarn(`Skipping malformed or unparsable data line. This line will not be processed by the strategist. Line: ${truncate(line, 200)}`);
@@ -811,6 +811,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 
 
         const finishReason = extractFinishReason(line);
+
         if (finishReason) {
             finishReasonArrived = true;
             logInfo(`Finish reason received: ${finishReason}. Current state: ${strategist.streamState}`);
@@ -930,6 +931,24 @@ async function handleStreamingPost(request) {
   } catch (e) {
     logError("Failed to parse request body:", e.message);
     return jsonError(400, "Invalid JSON in request body", { error: e.message });
+  }
+
+  // 新增：兼容驼峰与蛇形命名 (实现方式更优越)
+  // 核心思想是在处理早期将所有命名风格统一为驼峰式，确保后续逻辑的纯粹性。
+  const hasSnakeCase = 'generation_config' in body;
+  const hasCamelCase = 'generationConfig' in body;
+
+  if (hasSnakeCase) {
+    if (hasCamelCase) {
+      // 如果两种命名同时存在，这是一个冲突。我们优先保留官方推荐的驼峰命名，并移除蛇形命名。
+      logWarn("Naming conflict: Both 'generationConfig' and 'generation_config' found. Removing 'generation_config'.");
+      delete body.generation_config;
+    } else {
+      // 如果只有蛇形命名，我们将其规范化为驼峰命名，以兼容后续所有处理逻辑。
+      logInfo("Normalizing 'generation_config' to 'generationConfig' for compatibility.");
+      body.generationConfig = body.generation_config;
+      delete body.generation_config;
+    }
   }
 
 // ============ 核心修复：参考的严格冲突预防机制 ============
