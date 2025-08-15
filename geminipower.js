@@ -4,7 +4,7 @@
  * @version 3.9.0
  * @license MIT
  */
-
+const GEMINI_VERSION_REGEX = /gemini-([\d.]+)/;
 const CONFIG = {
   upstream_url_base: "https://generativelanguage.googleapis.com",
   max_consecutive_retries: 100,
@@ -32,13 +32,17 @@ const truncate = (s, n = 8000) => {
   return s.length > n ? `${s.slice(0, n)}... [truncated]` : s;
 };
 function textToUnicodeEscapes(text) {
-  let result = "";
-  for (let i = 0; i < text.length; i++) {
-    const hex = text.charCodeAt(i).toString(16).padStart(4, '0');
-    result += `\\u${hex}`;
+  if (!text) return "";
+  const chunks = [];
+  const len = text.length;
+  for (let i = 0; i < len; i++) {
+    const code = text.charCodeAt(i);
+    const hex = code.toString(16);
+    chunks.push("\\u", "0000".slice(hex.length), hex);
   }
-  return result;
+  return chunks.join("");
 }
+
 const handleOPTIONS = () => new Response(null, {
   headers: {
     "Access-Control-Allow-Origin": "*",
@@ -54,25 +58,32 @@ const jsonError = (status, message, details = null) => {
   });
 };
 
+const GOOGLE_STATUS_MAP = new Map([
+  [400, "INVALID_ARGUMENT"],
+  [401, "UNAUTHENTICATED"],
+  [403, "PERMISSION_DENIED"],
+  [404, "NOT_FOUND"],
+  [429, "RESOURCE_EXHAUSTED"],
+  [500, "INTERNAL"],
+  [503, "UNAVAILABLE"],
+  [504, "DEADLINE_EXCEEDED"],
+]);
 function statusToGoogleStatus(code) {
-  if (code === 400) return "INVALID_ARGUMENT";
-  if (code === 401) return "UNAUTHENTICATED";
-  if (code === 403) return "PERMISSION_DENIED";
-  if (code === 404) return "NOT_FOUND";
-  if (code === 429) return "RESOURCE_EXHAUSTED";
-  if (code === 500) return "INTERNAL";
-  if (code === 503) return "UNAVAILABLE";
-  if (code === 504) return "DEADLINE_EXCEEDED";
-  return "UNKNOWN";
+  return GOOGLE_STATUS_MAP.get(code) || "UNKNOWN";
 }
 
+const HEADERS_TO_COPY = ["authorization", "x-goog-api-key", "content-type", "accept"];
 function buildUpstreamHeaders(reqHeaders) {
   const h = new Headers();
-  const copy = (k) => { const v = reqHeaders.get(k); if (v) h.set(k, v); };
-  copy("authorization");
-  copy("x-goog-api-key");
-  copy("content-type");
-  copy("accept");
+  let v;
+  v = reqHeaders.get("authorization");
+  if (v) h.set("authorization", v);
+  v = reqHeaders.get("x-goog-api-key");
+  if (v) h.set("x-goog-api-key", v);
+  v = reqHeaders.get("content-type");
+  if (v) h.set("content-type", v);
+  v = reqHeaders.get("accept");
+  if (v) h.set("accept", v);
   return h;
 }
 
@@ -141,47 +152,62 @@ async function writeSSEErrorFromUpstream(writer, upstreamResp) {
 }
 
 async function* sseLineIterator(reader) {
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let lineCount = 0;
-  logDebug("Starting SSE line iteration");
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      logDebug(`SSE stream ended. Total lines processed: ${lineCount}. Remaining buffer: "${buffer.trim()}"`);
-      if (buffer.trim()) yield buffer;
-      break;
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let lineCount = 0;
+    logDebug("Starting SSE line iteration with optimized parser");
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+            logDebug(`SSE stream ended. Total lines processed: ${lineCount}. Remaining buffer: "${buffer.trim()}"`);
+            if (buffer.trim()) yield buffer;
+            break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let start = 0;
+        let pos;
+        while ((pos = buffer.indexOf('\n', start)) !== -1) {
+            const line = buffer.slice(start, pos).trim();
+            if (line) {
+                lineCount++;
+                logDebug(`SSE Line ${lineCount}: ${line.length > 200 ? line.substring(0, 200) + "..." : line}`);
+                yield line;
+            }
+            start = pos + 1;
+        }
+        buffer = start > 0 ? buffer.slice(start) : buffer;
     }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (line.trim()) {
-        lineCount++;
-        logDebug(`SSE Line ${lineCount}: ${line.length > 200 ? line.substring(0, 200) + "..." : line}`);
-        yield line;
-      }
-    }
-  }
 }
 
 const isDataLine = (line) => line.startsWith("data: ");
 const isBlockedLine = (line) => line.includes("blockReason");
 
 function extractFinishReason(line) {
-  if (!line.includes("finishReason")) return null;
-  try {
-    const i = line.indexOf("{");
-    if (i === -1) return null;
-    const data = JSON.parse(line.slice(i));
-    const fr = data?.candidates?.[0]?.finishReason || null;
-    logDebug(`Extracted finishReason: ${fr}`);
-    return fr;
-  } catch (e) {
-    logDebug(`Failed to extract finishReason from line: ${e.message}`);
-    return null;
-  }
+    if (!line.startsWith("data:")) {
+        return null;
+    }
+    const braceIndex = line.indexOf('{');
+    if (braceIndex === -1) return null;
+    
+    try {
+        const jsonStr = line.slice(braceIndex);
+        const data = JSON.parse(jsonStr);
+        const candidates = data.candidates;
+        if (!candidates || !candidates[0]) return null;
+        
+        const fr = candidates[0].finishReason;
+        if (fr) {
+            logDebug(`Extracted finishReason: ${fr}`);
+            return fr;
+        }
+        return null;
+    } catch (e) {
+        logDebug(`Failed to extract finishReason from line: ${e.message}`);
+        return null;
+    }
 }
+
+
 
 /**
  * Parses a "data:" line from an SSE stream to extract text content and determine if it's a "thought" chunk.
@@ -189,12 +215,19 @@ function extractFinishReason(line) {
  * @returns {{text: string, isThought: boolean}} An object containing the extracted text and a boolean indicating if it's a thought.
  */
 function parseLineContent(line) {
+  const braceIndex = line.indexOf('{');
+  if (braceIndex === -1) return { text: "", isThought: false };
+  
   try {
-    const jsonStr = line.slice(line.indexOf('{'));
+    const jsonStr = line.slice(braceIndex);
     const data = JSON.parse(jsonStr);
-    const part = data?.candidates?.[0]?.content?.parts?.[0];
-    if (!part) return { text: "", isThought: false };
-
+    const candidates = data.candidates;
+    if (!candidates || !candidates[0]) return { text: "", isThought: false };
+    
+    const content = candidates[0].content;
+    if (!content || !content.parts || !content.parts[0]) return { text: "", isThought: false };
+    
+    const part = content.parts[0];
     const text = part.text || "";
     const isThought = part.thought === true;
     
@@ -211,34 +244,60 @@ function parseLineContent(line) {
   }
 }
 
-function buildRetryRequestBody(originalBody, accumulatedText) {
-  logDebug(`Building retry request body. Accumulated text length: ${accumulatedText.length}`);
-  logDebug(`Accumulated text preview: ${accumulatedText.length > 200 ? accumulatedText.substring(0, 200) + "..." : accumulatedText}`);
-  const retryBody = JSON.parse(JSON.stringify(originalBody));
-  if (!retryBody.contents) retryBody.contents = [];
-  const lastUserIndex = retryBody.contents.map(c => c.role).lastIndexOf("user");
 
-  // 使用Unicode转义策略增强重试稳定性
-  const preservedLength = 15; // 保留一小部分文本为纯文本，以提供直接上下文
-  const plainPart = accumulatedText.slice(Math.max(0, accumulatedText.length - preservedLength));
-  const escapedPart = accumulatedText.slice(0, Math.max(0, accumulatedText.length - preservedLength));
-  const escapedAccumulatedText = textToUnicodeEscapes(escapedPart) + plainPart;
-  logDebug(`Applied Unicode escaping to ${escapedPart.length} chars for retry prompt.`);
+function buildRetryRequestBody(originalBody, accumulatedText) {
+  const textLen = accumulatedText.length;
+  logDebug(`Building retry request body. Accumulated text length: ${textLen}`);
+  logDebug(`Accumulated text preview: ${textLen > 200 ? accumulatedText.substring(0, 200) + "..." : accumulatedText}`);
+  
+  const retryBody = structuredClone(originalBody);
+  const contents = retryBody.contents = retryBody.contents || [];
+  
+  let lastUserIndex = -1;
+  for (let i = contents.length - 1; i >= 0; i--) {
+    if (contents[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  const preservedLength = 15;
+  const splitPoint = Math.max(0, textLen - preservedLength);
+  const escapedPart = textLen > preservedLength ? textToUnicodeEscapes(accumulatedText.slice(0, splitPoint)) : "";
+  const plainPart = accumulatedText.slice(splitPoint);
+  const escapedAccumulatedText = escapedPart + plainPart;
+  logDebug(`Applied Unicode escaping to ${splitPoint} chars for retry prompt.`);
 
   const history = [
     { role: "model", parts: [{ text: escapedAccumulatedText }] },
-    { role: "user", parts: [{ text: CONFIG.retry_prompt }] } // 使用配置的提示文本
+    { role: "user", parts: [{ text: CONFIG.retry_prompt }] }
   ];
+  
   if (lastUserIndex !== -1) {
-    retryBody.contents.splice(lastUserIndex + 1, 0, ...history);
+    contents.splice(lastUserIndex + 1, 0, ...history);
     logDebug(`Inserted retry context after user message at index ${lastUserIndex}`);
   } else {
-    retryBody.contents.push(...history);
+    contents.push(...history);
     logDebug(`Appended retry context to end of conversation`);
   }
-  logDebug(`Final retry request has ${retryBody.contents.length} messages`);
+  logDebug(`Final retry request has ${contents.length} messages`);
   return retryBody;
 }
+
+// 新增一个辅助函数来封装完成状态的判断逻辑，提高代码清晰度
+const isGenerationComplete = (text) => {
+    if (!text) return true;
+    let end = text.length - 1;
+    while (end >= 0 && (text.charCodeAt(end) <= 32)) end--; // 高效地找到最后一个非空白字符
+    if (end < 0) return true;
+
+    const trimmedText = text.slice(0, end + 1);
+    
+    if (trimmedText.endsWith('[done]')) return true; 
+
+    const lastChar = text.charAt(end);
+    return FINAL_PUNCTUATION.has(lastChar);
+};
 
 
 async function processStreamAndRetryInternally({ initialReader, writer, originalRequestBody, upstreamUrl, originalHeaders }) {
@@ -247,7 +306,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
   let currentReader = initialReader;
   let totalLinesProcessed = 0;
   const sessionStartTime = Date.now();
-  
+  const encoder = new TextEncoder();
   let isOutputtingFormalText = false; // Tracks if we have started sending real content.
   let swallowModeActive = false; // Is the worker actively swallowing thoughts post-retry?
 
@@ -269,7 +328,8 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         totalLinesProcessed++;
         linesInThisStream++;
 
-        const { text: textChunk, isThought } = isDataLine(line) ? parseLineContent(line) : { text: "", isThought: false };
+        const isDataLineResult = isDataLine(line);
+        const { text: textChunk, isThought } = isDataLineResult ? parseLineContent(line) : { text: "", isThought: false };
         
         // --- Thought Swallowing Logic ---
         if (swallowModeActive) {
@@ -301,21 +361,16 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
           interruptionReason = "BLOCK";
           needsRetry = true;
         } else if (finishReason === "STOP") {
-          const tempAccumulatedText = accumulatedText + textChunk;
-          const trimmedText = tempAccumulatedText.trim();
-          const lastChar = trimmedText.slice(-1);
-          // A stream is considered complete if:
-          // 1. It's empty.
-          // 2. It ends with the "[done]" marker (primary, most reliable check).
-          // 3. As a fallback, it ends with a standard punctuation mark.
-          if (!(trimmedText.length === 0 || trimmedText.endsWith('[done]') || FINAL_PUNCTUATION.has(lastChar))) {
+          const potentialFullText = accumulatedText + textChunk;
+          if (!isGenerationComplete(potentialFullText)) {
+            const trimmed = potentialFullText.trim();
+            const lastChar = trimmed ? trimmed.slice(-1) : "";
             logError(`Finish reason 'STOP' treated as incomplete: text does not end with '[done]' or final punctuation. Last char: '${lastChar}'. Triggering retry.`);
             interruptionReason = "FINISH_INCOMPLETE";
             needsRetry = true;
           }
         } else if (finishReason && finishReason !== "MAX_TOKENS" && finishReason !== "STOP") {
           logError(`Abnormal finish reason: ${finishReason}. Triggering retry.`);
-
           interruptionReason = "FINISH_ABNORMAL";
           needsRetry = true;
         }
@@ -325,7 +380,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         }
         
         // --- Line is Good: Forward and Update State ---
-        await writer.write(new TextEncoder().encode(line + "\n\n"));
+        await writer.write(encoder.encode(line + "\n\n"));
 
         if (textChunk && !isThought) {
           isOutputtingFormalText = true; // Mark that we've started sending real text.
@@ -478,25 +533,15 @@ async function handleStreamingPost(request) {
   const newSystemPromptPart = {
           text: CONFIG.system_prompt_injection // 使用配置的系统指令
       };
-  // Case 1: `systemInstruction` field is missing or null.
-      // Create the `systemInstruction` object with the new prompt part.
-      if (!body.systemInstruction) {
-        body.systemInstruction = { parts: [newSystemPromptPart] };
-      } 
-      // Case 2: `systemInstruction` exists, but its `parts` array is missing, null, or not an array.
-      // Overwrite `parts` with a new array containing the new prompt part.
-      else if (!Array.isArray(body.systemInstruction.parts)) {
-        body.systemInstruction.parts = [newSystemPromptPart];
-      } 
-      // Case 3: `systemInstruction` and its `parts` array both exist.
-      // Append the new prompt part to the end of the existing array.
-      else {
-        body.systemInstruction.parts.push(newSystemPromptPart);
-      }
+  // 确保 systemInstruction 和 parts 数组存在且有效
+  body.systemInstruction = body.systemInstruction || {};
+  body.systemInstruction.parts = Array.isArray(body.systemInstruction.parts) ? body.systemInstruction.parts : [];
+  // 追加新的系统指令
+  body.systemInstruction.parts.push(newSystemPromptPart);
   // 自动识别新模型并强制开启 includeThoughts 以支持思考吞咽等高级功能
-  const geminiVersionMatch = urlObj.pathname.match(/gemini-([\d.]+)/);
+  const geminiVersionMatch = urlObj.pathname.match(GEMINI_VERSION_REGEX);
   // 假设版本 >= 1.5 的模型支持 "thoughts"
-  const isReasoningModel = geminiVersionMatch && parseFloat(geminiVersionMatch[1]) >= 1.5; 
+  const isReasoningModel = geminiVersionMatch && parseFloat(geminiVersionMatch[1]) >= 1.5;
 
   if (isReasoningModel) {
     if (!body.generationConfig) body.generationConfig = {};
@@ -651,4 +696,3 @@ if (typeof Deno !== "undefined") {
     return handleRequest(request, env);
   });
 }
-
