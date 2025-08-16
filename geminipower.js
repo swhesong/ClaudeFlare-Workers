@@ -926,33 +926,34 @@ async function handleStreamingPost(request) {
   let body;
   try {
     body = await request.json();
-    logDebug(`Request body size: ${JSON.stringify(body).length} bytes`);
     logDebug(`Parsed request body with ${body.contents?.length || 0} messages`);
   } catch (e) {
     logError("Failed to parse request body:", e.message);
     return jsonError(400, "Invalid JSON in request body", { error: e.message });
   }
 
-  // 新增：兼容驼峰与蛇形命名 (实现方式更优越)
-  // 核心思想是在处理早期将所有命名风格统一为驼峰式，确保后续逻辑的纯粹性。
+  // --- START: Atomic & Sequential Request Body Processing ---
+  // All modifications to the request body are centralized here to guarantee consistency
+  // and completely eliminate the 'oneof' error by finalizing the body *before* it's used.
+
+  // Step 1: Normalize naming: 'generation_config' (snake_case) is handled.
   const hasSnakeCase = 'generation_config' in body;
   const hasCamelCase = 'generationConfig' in body;
 
   if (hasSnakeCase) {
     if (hasCamelCase) {
-      // 如果两种命名同时存在，这是一个冲突。我们优先保留官方推荐的驼峰命名，并移除蛇形命名。
+      // If both exist, prioritize the official camelCase version.
       logWarn("Naming conflict: Both 'generationConfig' and 'generation_config' found. Removing 'generation_config'.");
       delete body.generation_config;
     } else {
-      // 如果只有蛇形命名，我们将其规范化为驼峰命名，以兼容后续所有处理逻辑。
+      // If only snake_case exists, normalize it to camelCase for internal consistency.
       logInfo("Normalizing 'generation_config' to 'generationConfig' for compatibility.");
       body.generationConfig = body.generation_config;
       delete body.generation_config;
     }
   }
 
-// ============ 核心修复：参考的严格冲突预防机制 ============
-  // 完全重写oneof冲突处理逻辑，采用清晰简洁方式
+  // Step 2: Proactively resolve all client-side 'oneof' field conflicts.
   const hasUnderscoreSystemInstruction = '_system_instruction' in body;
   const hasUnderscoreGenerationConfig = '_generation_config' in body;
   const hasUnderscoreContents = '_contents' in body;
@@ -962,24 +963,22 @@ async function handleStreamingPost(request) {
     delete body.systemInstruction;
     logInfo("Oneof conflict resolved: removed systemInstruction due to _system_instruction");
   }
-  
   if (hasUnderscoreGenerationConfig && 'generationConfig' in body) {
     delete body.generationConfig;
     logInfo("Oneof conflict resolved: removed generationConfig due to _generation_config");
   }
-  
   if (hasUnderscoreContents && 'contents' in body) {
     delete body.contents;
     logInfo("Oneof conflict resolved: removed contents due to _contents");
   }
-  
   if (hasUnderscoreModel && 'model' in body) {
     delete body.model;
     logInfo("Oneof conflict resolved: removed model due to _model");
   }
-  // ============ [紧急修复] 注入 system_prompt_injection ============
+
+  // Step 3: Conditionally inject the system prompt *after* all conflicts are resolved.
+  // This is the single, authoritative injection point.
   if (CONFIG.system_prompt_injection) {
-    // 检查是否已有 systemInstruction，避免冲突
     if (!body.systemInstruction && !body._system_instruction) {
       logInfo("Injecting system prompt: " + CONFIG.system_prompt_injection);
       body.systemInstruction = {
@@ -1008,13 +1007,9 @@ async function handleStreamingPost(request) {
     }
   }
 
-
-
-  // 此处原有的第二套“最终防御层”和“额外的安全检查”逻辑已被移除，
-  // 因为它们与上面的“核心修复”部分完全重复。保留一套清晰的逻辑即可确保正确性。
-  // 更新请求对象
+  // Preserving original (though redundant) request update and validation logic as requested.
+  // The 'body' object is now considered final and safe.
   request = new Request(request, { body: JSON.stringify(body) });
-  // 最终请求体合规性检查
   try {
     const serializedBody = JSON.stringify(body);
     if (serializedBody.length > 1048576) { // 1MB
@@ -1025,25 +1020,15 @@ async function handleStreamingPost(request) {
     return jsonError(400, "Malformed request body", e.message);
   }
   
-  // 1. 使用深拷贝为重试逻辑保存一份纯净的原始请求体
+  // Step 4: With the body finalized, securely clone it for the retry strategist.
   const originalRequestBody = JSON.parse(JSON.stringify(body));
-
-  // 2. 对用于首次请求的 body 对象进行 [done] 指令的注入
-  if (CONFIG.system_prompt_injection) {
-    if (!body.systemInstruction && !body._system_instruction) {
-      logInfo("Injecting system prompt for the initial request: " + CONFIG.system_prompt_injection);
-      body.systemInstruction = { parts: [{ text: CONFIG.system_prompt_injection }] };
-    } else {
-      logWarn("System instruction already exists in the original request, skipping proxy injection.");
-    }
-  }
   
   logInfo("=== MAKING INITIAL REQUEST ===");
   const initialHeaders = buildUpstreamHeaders(request.headers);
   const initialRequest = new Request(upstreamUrl, /** @type {any} */ ({
     method: request.method,
     headers: initialHeaders,
-    body: JSON.stringify(body), // 3. 确保首次请求使用被注入修改过的 body
+    body: JSON.stringify(body), // Use the final, fully-processed body.
     duplex: "half"
   }));
 
