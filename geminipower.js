@@ -1024,20 +1024,15 @@ async function handleStreamingPost(request) {
     return jsonError(400, "Malformed request body", e.message);
   }
   
-  // Step 4: With the body finalized, securely clone it for the retry strategist.
+  // Step 4: Finalize the request body by serializing it once for efficiency.
+  // This serialized version will be used for both the initial request and for
+  // creating a deep clone for the retry strategist.
   const serializedBody = JSON.stringify(body);
-  const originalRequestBody = JSON.parse(serializedBody);
-  
-  // Preserving original (though redundant) request update and validation logic as requested.
-  // The 'body' object is now considered final and safe.
-  request = new Request(request, { body: serializedBody });
-  try {
-    if (serializedBody.length > 1048576) { // 1MB
-      logWarn(`Request body size ${Math.round(serializedBody.length/1024)}KB is quite large`);
-    }
-  } catch (e) {
-    logError("Request body serialization validation failed:", e.message);
-    return jsonError(400, "Malformed request body", e.message);
+  const originalRequestBody = JSON.parse(serializedBody); // For the strategist
+
+  // Optional: Validate body size after serialization
+  if (serializedBody.length > 1048576) { // 1MB
+    logWarn(`Request body size ${Math.round(serializedBody.length/1024)}KB is quite large`);
   }
   
   logInfo("=== MAKING INITIAL REQUEST ===");
@@ -1045,7 +1040,7 @@ async function handleStreamingPost(request) {
   const initialRequest = new Request(upstreamUrl, /** @type {any} */ ({
     method: request.method,
     headers: initialHeaders,
-    body: serializedBody, // Use the pre-serialized body
+    body: serializedBody, // Use the single pre-serialized body
     duplex: "half"
   }));
 
