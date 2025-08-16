@@ -11,10 +11,10 @@ const CONFIG = {
   debug_mode: false,
   retry_delay_ms: 750,
   swallow_thoughts_after_retry: true,
-  // 新增：用于重试时告知模型的指令，建议使用中文
-  retry_prompt: "请严格按照之前的格式和语言，直接从你上次中断的地方无缝继续，不要有任何重复、前言或额外的解释。",
-  // 新增：用于注入系统提示的文本，告知模型结束标志
-  system_prompt_injection: "你的回答必须以 `[done]` 作为结束标记，以便我能准确识别你已完成输出。"
+  // Retry prompt: instruction for model continuation during retries
+  retry_prompt: "Please continue strictly according to the previous format and language, directly from where you were interrupted without any repetition, preamble or additional explanation.",
+  // System prompt injection: text for injecting system prompts, informing model of end markers
+  system_prompt_injection: "Your response must end with `[done]` as an end marker so I can accurately identify that you have completed the output."
 };
 
 const NON_RETRYABLE_STATUSES = new Set([400, 401, 403, 404, 429]);
@@ -92,14 +92,22 @@ function buildUpstreamHeaders(reqHeaders) {
 async function standardizeInitialError(initialResponse) {
   let upstreamText = "";
   
-  // 采用的更安全的错误读取机制
+  // Enhanced safe error reading mechanism
   try {
-    // 增加超时保护，避免长时间阻塞
+    // Add timeout protection to avoid long blocking
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
     
     try {
-      upstreamText = await initialResponse.clone().text();
+      // Actually use the abort signal for timeout control
+      upstreamText = await Promise.race([
+        initialResponse.clone().text(),
+        new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => {
+            reject(new Error('Timeout reading response'));
+          });
+        })
+      ]);
       clearTimeout(timeoutId);
       logError(`Upstream error body: ${truncate(upstreamText, 2000)}`);
     } catch (readError) {
@@ -337,7 +345,7 @@ function buildRetryRequestBody(originalBody, accumulatedText, retryPrompt) {
 
 
 
-// 新增一个辅助函数来封装完成状态的判断逻辑，提高代码清晰度
+// Helper function to encapsulate generation completion logic for better code clarity
 const isGenerationComplete = (text) => {
     if (!text) return true;
     let end = text.length - 1;
@@ -352,8 +360,7 @@ const isGenerationComplete = (text) => {
     return FINAL_PUNCTUATION.has(lastChar);
 };
 
-// -------------------- 核心升级：引入 RecoveryStrategist 专家决策类 --------------------
-// -------------------- 核心升级：引入 RecoveryStrategist 专家决策类 --------------------
+// -------------------- Core upgrade: Introducing RecoveryStrategist expert decision class --------------------
 // 移植而来，作为所有重试决策的“大脑”，实现了决策与执行的分离。
 const MIN_PROGRESS_CHARS = 50;
 const NO_PROGRESS_RETRY_THRESHOLD = 2;
@@ -366,7 +373,7 @@ class RecoveryStrategist {
     this.currentRetryDelay = CONFIG.retry_delay_ms;
     this.consecutiveRetryCount = 0;
     
-    // ============ 国际先进算法理念：三层状态管理架构 ============
+    // ============ International advanced algorithm concept: Three-layer state management architecture ============
     // Layer 1: Stream State Machine (借鉴的简洁性)
     this.streamState = "PENDING"; // PENDING -> REASONING -> ANSWERING
     this.isOutputtingFormalText = false;
@@ -389,7 +396,7 @@ class RecoveryStrategist {
     };
   }
 
-  // 新增：每次流尝试前重置状态
+  // Reset state before each stream attempt
   resetPerStreamState() {
     this.streamState = "PENDING";
     this.isOutputtingFormalText = false;
@@ -636,24 +643,20 @@ class RecoveryStrategist {
     // 使用可能被修改过的 textForModel 来构建请求体
     const retryBody = buildRetryRequestBody(this.originalRequestBody, textForModel, retryPrompt);
 
-    // ============ 最终防御层：确保每次重试请求绝对合规 ============
-    // 此处进行最终的、绝对的 oneof 冲突清理，无论上游逻辑如何，保证发出的请求万无一失。
-    // 这将彻底解决您报告的`oneof`错误。
-    if ('_system_instruction' in retryBody && 'systemInstruction' in retryBody) {
-      delete retryBody.systemInstruction;
-      logDebug("Final defense cleanup in retry body: removed systemInstruction");
-    }
-    if ('_generation_config' in retryBody && 'generationConfig' in retryBody) {
-      delete retryBody.generationConfig;
-      logDebug("Final defense cleanup in retry body: removed generationConfig");
-    }
-    if ('_contents' in retryBody && 'contents' in retryBody) {
-      delete retryBody.contents;
-      logDebug("Final defense cleanup in retry body: removed contents");
-    }
-    if ('_model' in retryBody && 'model' in retryBody) {
-      delete retryBody.model;
-      logDebug("Final defense cleanup in retry body: removed model");
+    // ============ Final safety check: Ensure retry request compliance ============
+    // Defense-in-depth: Remove any potential oneof conflicts as a safety measure
+    const oneofFields = [
+      ['_system_instruction', 'systemInstruction'],
+      ['_generation_config', 'generationConfig'], 
+      ['_contents', 'contents'],
+      ['_model', 'model']
+    ];
+    
+    for (const [privateField, publicField] of oneofFields) {
+      if (privateField in retryBody && publicField in retryBody) {
+        delete retryBody[publicField];
+        logDebug(`Safety cleanup in retry body: removed ${publicField}`);
+      }
     }
     
     return retryBody;
@@ -743,7 +746,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
   let currentReader = initialReader;
   let totalLinesProcessed = 0;
   const sessionStartTime = Date.now();
-  const encoder = new TextEncoder();
+  const SSE_ENCODER = new TextEncoder();
   let swallowModeActive = false;
 
   const cleanup = (reader) => { if (reader) { logDebug("Cleaning up reader"); reader.cancel().catch(() => {}); } };
@@ -778,7 +781,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             }
         }
 
-        await writer.write(encoder.encode(line + "\n\n"));
+        await writer.write(SSE_ENCODER.encode(line + "\n\n"));
         
         if (!isDataLine(line)) {
             logDebug(`Forwarding non-data line: ${line}`);
@@ -849,6 +852,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       interruptionReason = "FETCH_ERROR";
     } finally {
       cleanup(currentReader);
+      currentReader = null;
       logDebug(`Stream attempt summary: Duration: ${Date.now() - streamStartTime}ms, Lines: ${linesInThisStream}, Chars: ${textInThisStream.length}`);
     }
 
@@ -873,7 +877,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
           details: [{ "@type": "proxy.retry_exhausted", strategy_report: report }]
         }
       };
-      await writer.write(encoder.encode(`event: error\ndata: ${JSON.stringify(payload)}\n\n`));
+      await writer.write(SSE_ENCODER.encode(`event: error\ndata: ${JSON.stringify(payload)}\n\n`));
       return writer.close();
     }
 
@@ -922,7 +926,7 @@ async function handleStreamingPost(request) {
   logInfo(`Request method: ${request.method}`);
   logInfo(`Content-Type: ${request.headers.get("content-type")}`);
 
-  // ============ 集成的稳定JSON解析逻辑 ============
+  // Integrated stable JSON parsing logic
   let body;
   try {
     body = await request.json();
@@ -1021,17 +1025,29 @@ async function handleStreamingPost(request) {
   }
   
   // Step 4: With the body finalized, securely clone it for the retry strategist.
-  const originalRequestBody = JSON.parse(JSON.stringify(body));
+  const serializedBody = JSON.stringify(body);
+  const originalRequestBody = JSON.parse(serializedBody);
+  
+  // Preserving original (though redundant) request update and validation logic as requested.
+  // The 'body' object is now considered final and safe.
+  request = new Request(request, { body: serializedBody });
+  try {
+    if (serializedBody.length > 1048576) { // 1MB
+      logWarn(`Request body size ${Math.round(serializedBody.length/1024)}KB is quite large`);
+    }
+  } catch (e) {
+    logError("Request body serialization validation failed:", e.message);
+    return jsonError(400, "Malformed request body", e.message);
+  }
   
   logInfo("=== MAKING INITIAL REQUEST ===");
   const initialHeaders = buildUpstreamHeaders(request.headers);
   const initialRequest = new Request(upstreamUrl, /** @type {any} */ ({
     method: request.method,
     headers: initialHeaders,
-    body: JSON.stringify(body), // Use the final, fully-processed body.
+    body: serializedBody, // Use the pre-serialized body
     duplex: "half"
   }));
-
 
 
   const t0 = Date.now();
@@ -1119,8 +1135,8 @@ async function handleRequest(request, env) {
               if (originalType === 'boolean') {
                   CONFIG[key] = String(envValue).toLowerCase() === 'true';
               } else if (originalType === 'number') {
-                  const num = parseInt(envValue, 10);
-                  if (!isNaN(num) && num >= 0) { // 添加合理性检查
+                  const num = Number(envValue);
+                  if (Number.isInteger(num) && num >= 0) { // Enhanced validity check
                       CONFIG[key] = num;
                   } else {
                       logWarn(`Invalid numeric config for ${key}: ${envValue}, keeping default`);
@@ -1128,8 +1144,8 @@ async function handleRequest(request, env) {
               } else if (originalType === 'string') {
                   CONFIG[key] = String(envValue);
               } else {
-                  // 对复杂类型（如Set）进行安全处理
-                  logDebug(`Complex config type for ${key}, keeping default value`);
+                  // Keep original value for complex types like Set
+                  logWarn(`Unsupported config type for ${key}: ${originalType}, keeping original value`);
               }
               logDebug(`Config updated: ${key} = ${CONFIG[key]}`);
           }
