@@ -977,6 +977,19 @@ async function handleStreamingPost(request) {
     delete body.model;
     logInfo("Oneof conflict resolved: removed model due to _model");
   }
+  // ============ [紧急修复] 注入 system_prompt_injection ============
+  if (CONFIG.system_prompt_injection) {
+    // 检查是否已有 systemInstruction，避免冲突
+    if (!body.systemInstruction && !body._system_instruction) {
+      logInfo("Injecting system prompt: " + CONFIG.system_prompt_injection);
+      body.systemInstruction = {
+        parts: [{ text: CONFIG.system_prompt_injection }]
+      };
+    } else {
+      logWarn("System instruction already exists in request, skipping injection.");
+    }
+  }
+  // =============================================================
 
   // "不干涉"策略：被动检测模型特性用于日志和功能感知，但绝不主动修改客户端的请求体。
   const geminiVersionMatch = urlObj.pathname.match(GEMINI_VERSION_REGEX);
@@ -995,10 +1008,10 @@ async function handleStreamingPost(request) {
     }
   }
 
+
+
   // 此处原有的第二套“最终防御层”和“额外的安全检查”逻辑已被移除，
   // 因为它们与上面的“核心修复”部分完全重复。保留一套清晰的逻辑即可确保正确性。
-
-  
   // 更新请求对象
   request = new Request(request, { body: JSON.stringify(body) });
   // 最终请求体合规性检查
@@ -1012,18 +1025,27 @@ async function handleStreamingPost(request) {
     return jsonError(400, "Malformed request body", e.message);
   }
   
-  // 使用已解析的body作为originalRequestBody
-  const originalRequestBody = body;
+  // 1. 使用深拷贝为重试逻辑保存一份纯净的原始请求体
+  const originalRequestBody = JSON.parse(JSON.stringify(body));
 
+  // 2. 对用于首次请求的 body 对象进行 [done] 指令的注入
+  if (CONFIG.system_prompt_injection) {
+    if (!body.systemInstruction && !body._system_instruction) {
+      logInfo("Injecting system prompt for the initial request: " + CONFIG.system_prompt_injection);
+      body.systemInstruction = { parts: [{ text: CONFIG.system_prompt_injection }] };
+    } else {
+      logWarn("System instruction already exists in the original request, skipping proxy injection.");
+    }
+  }
+  
   logInfo("=== MAKING INITIAL REQUEST ===");
   const initialHeaders = buildUpstreamHeaders(request.headers);
   const initialRequest = new Request(upstreamUrl, /** @type {any} */ ({
     method: request.method,
     headers: initialHeaders,
-    body: JSON.stringify(originalRequestBody),
+    body: JSON.stringify(body), // 3. 确保首次请求使用被注入修改过的 body
     duplex: "half"
   }));
-
 
 
 
