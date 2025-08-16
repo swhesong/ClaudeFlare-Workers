@@ -11,6 +11,9 @@ const CONFIG = {
   debug_mode: false,
   retry_delay_ms: 750,
   swallow_thoughts_after_retry: true,
+  // this flag enables a heuristic check for sentence-ending punctuation.
+  // This is an advanced feature that should be enabled if you frequently see responses cut off mid-sentence.
+  enable_final_punctuation_check: true,
   // Retry prompt: instruction for model continuation during retries
   retry_prompt: "Please continue strictly according to the previous format and language, directly from where you were interrupted without any repetition, preamble or additional explanation.",
   // System prompt injection: text for injecting system prompts, informing model of end markers
@@ -33,15 +36,14 @@ const truncate = (s, n = 8000) => {
   return s.length > n ? `${s.slice(0, n)}... [truncated]` : s;
 };
 function sanitizeTextForJSON(text) {
-  if (!text) return "";
-  return text
-      .replace(/\\/g, '\\\\') // 1. Escape backslashes
-      .replace(/"/g, '\\"')   // 2. Escape double quotes
-      .replace(/\n/g, '\\n')  // 3. Escape newlines
-      .replace(/\r/g, '\\r')  // 4. Escape carriage returns
-      .replace(/\t/g, '\\t')  // 5. Escape tabs
-      // 6. Remove control characters, but keep the ones we just escaped
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  // Use the built-in JSON stringifier, which is the most robust way to handle all
+  // necessary escaping for a string that will be embedded within a JSON structure.
+  if (typeof text !== 'string' || !text) return "";
+  
+  // JSON.stringify correctly escapes the string and wraps it in double quotes.
+  // We just need to remove the outer quotes to get the sanitized content.
+  const jsonString = JSON.stringify(text);
+  return jsonString.slice(1, -1);
 }
 
 const handleOPTIONS = () => new Response(null, {
@@ -77,48 +79,41 @@ function statusToGoogleStatus(code) {
 const HEADERS_TO_COPY = ["authorization", "x-goog-api-key", "content-type", "accept"];
 function buildUpstreamHeaders(reqHeaders) {
   const h = new Headers();
-  let v;
-  v = reqHeaders.get("authorization");
-  if (v) h.set("authorization", v);
-  v = reqHeaders.get("x-goog-api-key");
-  if (v) h.set("x-goog-api-key", v);
-  v = reqHeaders.get("content-type");
-  if (v) h.set("content-type", v);
-  v = reqHeaders.get("accept");
-  if (v) h.set("accept", v);
+  for (const key of HEADERS_TO_COPY) {
+    const value = reqHeaders.get(key);
+    if (value) {
+      h.set(key, value);
+    }
+  }
   return h;
 }
 
 async function standardizeInitialError(initialResponse) {
   let upstreamText = "";
   
-  // Enhanced safe error reading mechanism
+  // Enhanced safe error reading mechanism with a modern timeout API
   try {
-    // Add timeout protection to avoid long blocking
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    // AbortSignal.timeout() provides a cleaner way to enforce a timeout on an async operation.
+    const signal = AbortSignal.timeout(5000); // 5 second timeout
     
-    try {
-      // Actually use the abort signal for timeout control
-      upstreamText = await Promise.race([
-        initialResponse.clone().text(),
-        new Promise((_, reject) => {
-          controller.signal.addEventListener('abort', () => {
-            reject(new Error('Timeout reading response'));
-          });
-        })
-      ]);
-      clearTimeout(timeoutId);
-      logError(`Upstream error body: ${truncate(upstreamText, 2000)}`);
-    } catch (readError) {
-      clearTimeout(timeoutId);
-      throw readError;
-    }
+    // Pass the signal directly to the fetch-like call.
+    // If the timeout is reached, it will throw a 'TimeoutError'.
+    upstreamText = await initialResponse.clone().text({ signal });
+    logError(`Upstream error body: ${truncate(upstreamText, 2000)}`);
+
   } catch (e) {
-    logError(`Failed to read upstream error text (attachment-2 enhanced): ${e.message}`);
-    // 采用的graceful degradation
-    upstreamText = `[Error reading response: ${e.message}]`;
+    let errorMessage = e.message;
+    // Specifically check for the timeout error to provide a clear log message.
+    if (e.name === 'TimeoutError') {
+      errorMessage = 'Timeout reading response body';
+      logError(`Failed to read upstream error text: ${errorMessage}`);
+    } else {
+      logError(`Failed to read upstream error text (enhanced): ${errorMessage}`);
+    }
+    // Graceful degradation: provide a fallback error text.
+    upstreamText = `[Error reading response: ${errorMessage}]`;
   }
+
 
   let standardized = null;
   
@@ -138,12 +133,12 @@ async function standardizeInitialError(initialResponse) {
           parsed.error.status = statusToGoogleStatus(parsed.error.code);
         }
         standardized = parsed;
-        logDebug("Successfully parsed upstream error with attachment-2 validation");
+        logDebug("Successfully parsed upstream error with validation");
       } else {
         logWarn("Upstream error format validation failed, creating standardized error");
       }
     } catch (parseError) {
-      logError(`JSON parsing failed (attachment-2 handling): ${parseError.message}`);
+      logError(`JSON parsing failed (handling): ${parseError.message}`);
     }
   }
 
@@ -211,7 +206,10 @@ async function writeSSEErrorFromUpstream(writer, upstreamResp) {
       const obj = JSON.parse(text);
       obj.error.details = (obj.error.details || []).concat([{ "@type": "proxy.retry", retry_after: ra }]);
       text = JSON.stringify(obj);
-    } catch (_) {}
+    } catch (e) {
+        // If JSON parsing fails, we still want to send the original error text.
+        logWarn(`Could not inject Retry-After into SSE error due to JSON parse failure: ${e.message}`);
+    }
   }
   await writer.write(SSE_ENCODER.encode(`event: error\ndata: ${text}\n\n`));
 }
@@ -220,29 +218,28 @@ async function* sseLineIterator(reader) {
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
     let lineCount = 0;
-    logDebug("Starting SSE line iteration with optimized parser");
+    logDebug("Starting SSE line iteration with robust parser");
     while (true) {
         const { value, done } = await reader.read();
         if (done) {
             logDebug(`SSE stream ended. Total lines processed: ${lineCount}. Remaining buffer: "${buffer.trim()}"`);
-            if (buffer.trim()) yield buffer;
+            if (buffer.trim()) yield buffer.trim();
             break;
         }
         buffer += decoder.decode(value, { stream: true });
-        let start = 0;
-        let pos;
-        while ((pos = buffer.indexOf('\n', start)) !== -1) {
-            const line = buffer.slice(start, pos).trim();
-            if (line) {
-                lineCount++;
-                logDebug(`SSE Line ${lineCount}: ${line.length > 200 ? line.substring(0, 200) + "..." : line}`);
-                yield line;
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine) {
+                 lineCount++;
+                 logDebug(`SSE Line ${lineCount}: ${trimmedLine.length > 200 ? trimmedLine.substring(0, 200) + "..." : trimmedLine}`);
+                 yield trimmedLine;
             }
-            start = pos + 1;
         }
-        buffer = start > 0 ? buffer.slice(start) : buffer;
     }
 }
+
 
 const isDataLine = (line) => line.startsWith("data: ");
 const isBlockedLine = (line) => line.includes("blockReason");
@@ -349,15 +346,32 @@ function buildRetryRequestBody(originalBody, accumulatedText, retryPrompt) {
 const isGenerationComplete = (text) => {
     if (!text) return true;
     let end = text.length - 1;
-    while (end >= 0 && (text.charCodeAt(end) <= 32)) end--; // 高效地找到最后一个非空白字符
+    while (end >= 0 && (text.charCodeAt(end) <= 32)) end--; // Efficiently find the last non-whitespace character
     if (end < 0) return true;
-
     const trimmedText = text.slice(0, end + 1);
-    
-    if (trimmedText.endsWith('[done]')) return true; 
 
-    const lastChar = text.charAt(end);
-    return FINAL_PUNCTUATION.has(lastChar);
+    // Primary completion marker is the most reliable signal.
+    if (trimmedText.endsWith('[done]')) {
+         logDebug("Generation complete: Found '[done]' marker.");
+         return true;
+    }
+
+    // If marker is not found, fallback to heuristic check ONLY if enabled.
+    if (CONFIG.enable_final_punctuation_check) {
+        const lastChar = text.charAt(end);
+        const isPunctuationComplete = FINAL_PUNCTUATION.has(lastChar);
+        if (isPunctuationComplete) {
+            logDebug(`Heuristic check passed: Last character ('${lastChar}') is valid final punctuation.`);
+        } else {
+            logWarn(`Heuristic check failed: Last character ('${lastChar}') is not final punctuation. Treating as incomplete.`);
+        }
+        return isPunctuationComplete;
+    }
+
+    // Default case: If punctuation check is disabled and no '[done]' marker,
+    // trust the 'finishReason: STOP' from the API and consider it complete.
+    // This prevents false negatives and unnecessary retries.
+    return true;
 };
 
 // -------------------- Core upgrade: Introducing RecoveryStrategist expert decision class --------------------
@@ -739,7 +753,6 @@ class RecoveryStrategist {
     }
 }
 
-
 async function processStreamAndRetryInternally({ initialReader, writer, originalRequestBody, upstreamUrl, originalHeaders }) {
   const strategist = new RecoveryStrategist(originalRequestBody);
   let accumulatedText = "";
@@ -754,7 +767,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
   // 使用 for 循环代替 while(true)，使每次循环都是一次清晰的“尝试”
   for (let attempt = 0; ; attempt++) {
     let interruptionReason = null;
-    let cleanExit = false;
+    // let cleanExit = false;
     const streamStartTime = Date.now();
     strategist.resetPerStreamState();
     let linesInThisStream = 0;
@@ -767,39 +780,42 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       for await (const line of sseLineIterator(currentReader)) {
         totalLinesProcessed++;
         linesInThisStream++;
+
+        // 优化点1：非`data:`行直接转发，逻辑前置，保持循环体核心专注于处理数据。
+        if (!isDataLine(line)) {
+            logDebug(`Forwarding non-data line: ${line}`);
+            await writer.write(SSE_ENCODER.encode(line + "\n\n"));
+            continue;
+        }
+
+        // 优化点2：将JSON解析作为核心防御层。
+        // `parseLineContent`内部已包含try-catch，如果失败会返回 payload: null
+        const { text: textChunk, isThought, payload } = parseLineContent(line);
+
+        // ============ 终极Payload有效性防御层 (已通过 parseLineContent 实现) ============
+        if (!payload) {
+            logWarn(`Skipping malformed or unparsable data line. Forwarding as-is. Line: ${truncate(line, 200)}`);
+            // 尽管无法解析，但依然可能对客户端有意义，因此选择转发而非静默跳过。
+            await writer.write(SSE_ENCODER.encode(line + "\n\n"));
+            continue;
+        }
         
-        // 如果处于吞咽模式，先判断再写入，减少不必要的写入操作
+        // 优化点3：将“思想吞咽”逻辑放在解析成功之后，确保只对有效的思想块操作。
         if (swallowModeActive) {
-            const { isThought } = parseLineContent(line);
             if (isThought) {
                 logDebug("Swallowing thought chunk due to post-retry filter:", line);
                 continue; // 跳过此行，不写入也不处理
             } else {
                 // 收到第一个非 thought 内容后，关闭吞咽模式
                 logInfo("First formal text chunk received after swallowing. Resuming normal stream.");
-                swallowModeActive = false;
+                swallowModeActive = false; // 迎来第一个正式内容，关闭吞咽模式
             }
         }
 
+        // 所有检查通过后，再写入客户端，确保客户端收到的流是经过代理确认的。
         await writer.write(SSE_ENCODER.encode(line + "\n\n"));
         
-        if (!isDataLine(line)) {
-            logDebug(`Forwarding non-data line: ${line}`);
-            continue;
-        }
-
-        const { text: textChunk, isThought, payload } = parseLineContent(line);
-
-        // ============ 终极Payload有效性防御层 (灵感源于的健壮性) ============
-        // 我们不仅防御JSON解析失败，
-        // 而且确保只有结构完整的payload才能进入后续的智能分析和状态更新。
-        if (!payload) {
-            logWarn(`Skipping malformed or unparsable data line. This line will not be processed by the strategist. Line: ${truncate(line, 200)}`);
-            // 核心改进：如果无法解析出有效payload，则立即跳过此行的所有后续处理，
-            // 防止任何形式的脏数据污染状态或引发意外错误。
-            continue; 
-        }
-
+        // --- 安全处理域开始：只处理验证过的有效 payload ---
         // 只有在 payload 绝对有效时，才继续进行状态更新和文本累加。
         try {
             strategist.updateStateFromPayload(payload);
@@ -808,35 +824,54 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         }
         
         if (textChunk && !isThought) {
-          accumulatedText += textChunk;
-          textInThisStream += textChunk;
+            accumulatedText += textChunk;
+            textInThisStream += textChunk;
         }
 
-
-        const finishReason = extractFinishReason(line);
-
+        // 优化点4：重构`finishReason`提取，使其不再依赖于原始line，而是直接从已解析的payload中获取，更高效可靠。
+        const finishReason = payload?.candidates?.[0]?.finishReason;
         if (finishReason) {
             finishReasonArrived = true;
             logInfo(`Finish reason received: ${finishReason}. Current state: ${strategist.streamState}`);
-            if (finishReason === "STOP") {
-                if (!strategist.isOutputtingFormalText) {
-                    interruptionReason = "STOP_WITHOUT_ANSWER";
-                } else if (!isGenerationComplete(accumulatedText)) {
-                    const trimmed = accumulatedText.trim();
-                    const lastChar = trimmed ? trimmed.slice(-1) : "";
-                    logError(`Finish reason 'STOP' treated as incomplete. Last char: '${lastChar}'. Triggering retry.`);
+            
+            // 采用清晰结构来重构判断逻辑，使意图更明确
+            switch (finishReason) {
+                case "STOP":
+                    if (!strategist.isOutputtingFormalText) {
+                        interruptionReason = "STOP_WITHOUT_ANSWER";
+                    } else if (!isGenerationComplete(accumulatedText)) {
+                    // The detailed reason is now logged inside isGenerationComplete.
+                    logError(`Finish reason 'STOP' treated as incomplete based on completion checks. Triggering retry.`);
                     interruptionReason = "FINISH_INCOMPLETE";
                 }
-            } else if (finishReason === "SAFETY" || finishReason === "RECITATION") {
-                 interruptionReason = `FINISH_${finishReason}`;
-            } else if (finishReason !== "MAX_TOKENS") {
-                interruptionReason = "FINISH_ABNORMAL";
+
+                    break;
+                case "SAFETY":
+                case "RECITATION":
+                    interruptionReason = `FINISH_${finishReason}`;
+                    break;
+                case "MAX_TOKENS":
+                    // MAX_TOKENS 是一个正常的、预期的终止条件，不应视为中断。
+                    // cleanExit = true;
+                    break;
+                default:
+                    // 其他所有未明确处理的 finishReason 都被视为异常中断。
+                    interruptionReason = "FINISH_ABNORMAL";
+                    break;
             }
-            if (!interruptionReason) cleanExit = true;
-            break;
+            
+            // 如果在 switch 中没有设置中断原因，则认为是正常退出，直接关闭流并结束函数
+            if (!interruptionReason) {
+                // cleanExit = true;
+                logInfo(`=== STREAM COMPLETED SUCCESSFULLY (via finishReason: ${finishReason}) ===`);
+                logInfo(`Total session duration: ${Date.now() - sessionStartTime}ms, Total lines: ${totalLinesProcessed}, Total retries: ${strategist.consecutiveRetryCount}`);
+                return writer.close(); 
+            }
+            break; // 退出 for 循环
         }
 
-        if (isBlockedLine(line)) {
+        // isBlockedLine 的判断同样可以直接从 payload 中获取，提升效率
+        if (payload?.candidates?.[0]?.blockReason) {
             interruptionReason = "BLOCK";
             break;
         }
@@ -856,11 +891,11 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       logDebug(`Stream attempt summary: Duration: ${Date.now() - streamStartTime}ms, Lines: ${linesInThisStream}, Chars: ${textInThisStream.length}`);
     }
 
-    if (cleanExit) {
-      logInfo(`=== STREAM COMPLETED SUCCESSFULLY ===`);
-      logInfo(`Total session duration: ${Date.now() - sessionStartTime}ms, Total lines: ${totalLinesProcessed}, Total retries: ${strategist.consecutiveRetryCount}`);
-      return writer.close();
-    }
+    // if (cleanExit) {
+      // logInfo(`=== STREAM COMPLETED SUCCESSFULLY ===`);
+      // logInfo(`Total session duration: ${Date.now() - sessionStartTime}ms, Total lines: ${totalLinesProcessed}, Total retries: ${strategist.consecutiveRetryCount}`);
+      // return writer.close();
+    // }
 
     logError(`=== STREAM INTERRUPTED (Reason: ${interruptionReason}) ===`);
     strategist.recordInterruption(interruptionReason, accumulatedText);
@@ -918,8 +953,9 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 }
 
 async function handleStreamingPost(request) {
-  const urlObj = new URL(request.url);
-  const upstreamUrl = `${CONFIG.upstream_url_base}${urlObj.pathname}${urlObj.search}`;
+  const requestUrl = new URL(request.url);
+  // Robust URL construction to prevent issues with trailing/leading slashes.
+  const upstreamUrl = new URL(requestUrl.pathname + requestUrl.search, CONFIG.upstream_url_base).toString();
 
   logInfo(`=== NEW STREAMING REQUEST ===`);
   logInfo(`Upstream URL: ${upstreamUrl}`);
@@ -994,28 +1030,24 @@ async function handleStreamingPost(request) {
   }
   // =============================================================
 
-  // "不干涉"策略：被动检测模型特性用于日志和功能感知，但绝不主动修改客户端的请求体。
-  const geminiVersionMatch = urlObj.pathname.match(GEMINI_VERSION_REGEX);
-  const isReasoningModel = geminiVersionMatch && parseFloat(geminiVersionMatch[1]) >= 1.5;
-
-  // 被动检查客户端是否已启用 thoughts。代理自身不会强制开启此设置。
-  // 诸如 'swallow_thoughts_after_retry' 等高级功能，仅在客户端请求已启用此项时才会生效。
+  // --- Robust Logging for Advanced Feature Awareness ---
+  // We log the client's intent directly from the request body, which is the sole determinant
+  // for activating advanced features. This approach removes the fragile dependency on parsing
+  // model versions from the URL, making our logging more reliable and future-proof.
   const thoughtsEnabledByClient = body.generationConfig?.thinkingConfig?.includeThoughts === true;
 
-  if (isReasoningModel) {
-    if (thoughtsEnabledByClient) {
-      logInfo(`Reasoning model (v${geminiVersionMatch[1]}) detected and 'includeThoughts' is enabled by client. Advanced recovery features are active.`);
-    } else {
-      // 仅记录日志，提供有用的上下文信息，不修改任何内容。
-      logInfo(`Reasoning model (v${geminiVersionMatch[1]}) detected, but 'includeThoughts' is not enabled in the request body. Advanced recovery features like thought swallowing will be inactive.`);
-    }
+  if (thoughtsEnabledByClient) {
+    logInfo(`'includeThoughts' is enabled by client. Advanced recovery features (e.g., thought swallowing) are potentially active.`);
+  } else {
+    logInfo(`'includeThoughts' is not enabled by client. Advanced recovery features will be inactive.`);
   }
 
-  // Preserving original (though redundant) request update and validation logic as requested.
-  // The 'body' object is now considered final and safe.
-  request = new Request(request, { body: JSON.stringify(body) });
+// Step 4: Finalize the request body by serializing it once for efficiency.
+  // This serialized version will be used for both the initial request and for
+  // creating a deep clone for the retry strategist.
+  let serializedBody;
   try {
-    const serializedBody = JSON.stringify(body);
+    serializedBody = JSON.stringify(body);
     if (serializedBody.length > 1048576) { // 1MB
       logWarn(`Request body size ${Math.round(serializedBody.length/1024)}KB is quite large`);
     }
@@ -1024,16 +1056,7 @@ async function handleStreamingPost(request) {
     return jsonError(400, "Malformed request body", e.message);
   }
   
-  // Step 4: Finalize the request body by serializing it once for efficiency.
-  // This serialized version will be used for both the initial request and for
-  // creating a deep clone for the retry strategist.
-  const serializedBody = JSON.stringify(body);
   const originalRequestBody = JSON.parse(serializedBody); // For the strategist
-
-  // Optional: Validate body size after serialization
-  if (serializedBody.length > 1048576) { // 1MB
-    logWarn(`Request body size ${Math.round(serializedBody.length/1024)}KB is quite large`);
-  }
   
   logInfo("=== MAKING INITIAL REQUEST ===");
   const initialHeaders = buildUpstreamHeaders(request.headers);
@@ -1043,7 +1066,6 @@ async function handleStreamingPost(request) {
     body: serializedBody, // Use the single pre-serialized body
     duplex: "half"
   }));
-
 
   const t0 = Date.now();
   const initialResponse = await fetch(initialRequest);
@@ -1117,41 +1139,37 @@ async function handleNonStreaming(request) {
 }
 
 // Main request handler for Cloudflare Workers
-// Main request handler for Cloudflare Workers
 async function handleRequest(request, env) {
-  // 采用更robust配置管理机制
   try {
-      for (const key in CONFIG) {
-          if (env && env[key] !== undefined) {
-              const envValue = env[key];
-              const originalType = typeof CONFIG[key];
-              
-              // 增强的类型安全转换（参考）
-              if (originalType === 'boolean') {
-                  CONFIG[key] = String(envValue).toLowerCase() === 'true';
-              } else if (originalType === 'number') {
-                  const num = Number(envValue);
-                  if (Number.isInteger(num) && num >= 0) { // Enhanced validity check
-                      CONFIG[key] = num;
-                  } else {
-                      logWarn(`Invalid numeric config for ${key}: ${envValue}, keeping default`);
-                  }
-              } else if (originalType === 'string') {
-                  CONFIG[key] = String(envValue);
-              } else {
-                  // Keep original value for complex types like Set
-                  logWarn(`Unsupported config type for ${key}: ${originalType}, keeping original value`);
-              }
-              logDebug(`Config updated: ${key} = ${CONFIG[key]}`);
-          }
-      }
-  } catch (configError) {
-      logError("Configuration loading error (using defaults):", configError.message);
-      // 继续执行，使用默认配置
-  }
+    // Stage 1: Robust Configuration Loading
+    try {
+        for (const key in CONFIG) {
+            if (env && env[key] !== undefined) {
+                const envValue = env[key];
+                const originalType = typeof CONFIG[key];
+                
+                if (originalType === 'boolean') {
+                    CONFIG[key] = String(envValue).toLowerCase() === 'true';
+                } else if (originalType === 'number') {
+                    const num = Number(envValue);
+                    if (Number.isInteger(num) && num >= 0) {
+                        CONFIG[key] = num;
+                    } else {
+                        logWarn(`Invalid numeric config for ${key}: ${envValue}, keeping default`);
+                    }
+                } else if (originalType === 'string') {
+                    CONFIG[key] = String(envValue);
+                } else {
+                    logWarn(`Unsupported config type for ${key}: ${originalType}, keeping original value`);
+                }
+                logDebug(`Config updated: ${key} = ${CONFIG[key]}`);
+            }
+        }
+    } catch (configError) {
+        logError("Configuration loading error (using defaults):", configError.message);
+    }
 
-  // Add the missing try block here
-  try {
+    // Stage 2: Main Request Handling Logic
     logInfo(`=== WORKER REQUEST ===`);
     logInfo(`Method: ${request.method}`);
     logInfo(`URL: ${request.url}`);
