@@ -955,7 +955,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 async function handleStreamingPost(request) {
   const requestUrl = new URL(request.url);
   // Robust URL construction to prevent issues with trailing/leading slashes.
-  const upstreamUrl = new URL(requestUrl.pathname + requestUrl.search, CONFIG.upstream_url_base).toString();
+  const upstreamUrl = `${CONFIG.upstream_url_base}${requestUrl.pathname}${requestUrl.search}`;
 
   logInfo(`=== NEW STREAMING REQUEST ===`);
   logInfo(`Upstream URL: ${upstreamUrl}`);
@@ -1182,6 +1182,18 @@ async function handleRequest(request, env) {
     }
 
     const url = new URL(request.url);
+    // ======================= ✨ 新增的根路径处理逻辑 ✨ =======================
+    if (request.method === "GET" && url.pathname === "/") {
+      logInfo("Handling GET request to root path.");
+      return new Response(
+        "Gemini API Proxy is running. This endpoint is for proxying API requests, not for direct browser access.",
+        { 
+          status: 200,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        }
+      );
+    }
+    // ======================================================================
     const alt = url.searchParams.get("alt");
     const isStream = /stream|sse/i.test(url.pathname) || alt === "sse";
     logInfo(`Detected streaming request: ${isStream}`);
