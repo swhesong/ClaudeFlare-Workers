@@ -273,21 +273,33 @@ function extractFinishReason(line) {
 
 /**
  * Parses a "data:" line from an SSE stream to extract text content and determine if it's a "thought" chunk.
+ * Modified to return both original and cleaned text (without [done] marker).
  * @param {string} line The "data: " line from the SSE stream.
- * @returns {{text: string, isThought: boolean, payload: object | null}} An object containing the extracted text, a boolean indicating if it's a thought, and the full JSON payload.
+ * @returns {{text: string, cleanedText: string, isThought: boolean, payload: object | null, hasDoneMarker: boolean}} 
  */
 function parseLineContent(line) {
   const braceIndex = line.indexOf('{');
-  if (braceIndex === -1) return { text: "", isThought: false, payload: null };
+  if (braceIndex === -1) return { text: "", cleanedText: "", isThought: false, payload: null, hasDoneMarker: false };
   
   try {
     const jsonStr = line.slice(braceIndex);
     const payload = JSON.parse(jsonStr);
     const part = payload?.candidates?.[0]?.content?.parts?.[0];
-    if (!part) return { text: "", isThought: false, payload };
+    if (!part) return { text: "", cleanedText: "", isThought: false, payload, hasDoneMarker: false };
     
     const text = part.text || "";
     const isThought = part.thought === true;
+    
+    // 🔥 检测并移除 [done] 标记，但保留原始文本用于内部验证
+    let cleanedText = text;
+    let hasDoneMarker = false;
+    
+    if (text.includes('[done]')) {
+      hasDoneMarker = true;
+      // 移除所有 [done] 标记及其前后的空白
+      cleanedText = text.replace(/\[done\]/g, '').trimEnd();
+      logDebug(`Detected [done] marker in text. Original length: ${text.length}, Cleaned length: ${cleanedText.length}`);
+    }
     
     if (isThought) {
         logDebug("Extracted thought chunk. This will be tracked.");
@@ -295,13 +307,32 @@ function parseLineContent(line) {
         logDebug(`Extracted text chunk (${text.length} chars): ${text.length > 100 ? text.substring(0, 100) + "..." : text}`);
     }
 
-    return { text, isThought, payload };
+    return { text, cleanedText, isThought, payload, hasDoneMarker };
   } catch (e) {
     logDebug(`Failed to parse content from data line: ${e.message}`);
-    return { text: "", isThought: false, payload: null };
+    return { text: "", cleanedText: "", isThought: false, payload: null, hasDoneMarker: false };
   }
 }
 
+/**
+ * Helper function to rebuild a data line with cleaned text
+ */
+function rebuildDataLine(payload, cleanedText) {
+  try {
+    // Deep clone the payload to avoid modifying the original
+    const cleanPayload = JSON.parse(JSON.stringify(payload));
+    
+    // Update the text in the payload
+    if (cleanPayload?.candidates?.[0]?.content?.parts?.[0]) {
+      cleanPayload.candidates[0].content.parts[0].text = cleanedText;
+    }
+    
+    return `data: ${JSON.stringify(cleanPayload)}`;
+  } catch (e) {
+    logError(`Failed to rebuild data line: ${e.message}`);
+    return null;
+  }
+}
 
 function buildRetryRequestBody(originalBody, accumulatedText, retryPrompt) {
   const textLen = accumulatedText.length;
@@ -790,7 +821,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 
         // 优化点2：将JSON解析作为核心防御层。
         // `parseLineContent`内部已包含try-catch，如果失败会返回 payload: null
-        const { text: textChunk, isThought, payload } = parseLineContent(line);
+        const { text: textChunk, cleanedText, isThought, payload, hasDoneMarker } = parseLineContent(line);
 
         // ============ 终极Payload有效性防御层 (已通过 parseLineContent 实现) ============
         if (!payload) {
@@ -812,8 +843,22 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             }
         }
 
-        // 所有检查通过后，再写入客户端，确保客户端收到的流是经过代理确认的。
-        await writer.write(SSE_ENCODER.encode(line + "\n\n"));
+        // 🔥 关键修改：如果包含 [done] 标记，发送清理后的版本给客户端
+        if (hasDoneMarker && cleanedText !== textChunk) {
+            // 需要重建数据行，移除 [done] 标记
+            const cleanLine = rebuildDataLine(payload, cleanedText);
+            if (cleanLine) {
+                await writer.write(SSE_ENCODER.encode(cleanLine + "\n\n"));
+                logDebug("Sent cleaned data line to client (removed [done] marker)");
+            } else {
+                // 如果重建失败，发送原始行（作为后备方案）
+                await writer.write(SSE_ENCODER.encode(line + "\n\n"));
+                logWarn("Failed to rebuild clean line, sent original");
+            }
+        } else {
+            // 没有 [done] 标记或无需清理，直接转发原始行
+            await writer.write(SSE_ENCODER.encode(line + "\n\n"));
+        }
         
         // --- 安全处理域开始：只处理验证过的有效 payload ---
         // 只有在 payload 绝对有效时，才继续进行状态更新和文本累加。
@@ -823,9 +868,10 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             logWarn(`Error during state update from a valid payload (non-critical, continuing stream): ${e.message}`, payload);
         }
         
+        // 🔥 关键：累积原始文本（包含 [done]）用于内部完整性检查，同时分别记录发送给客户端的文本
         if (textChunk && !isThought) {
-            accumulatedText += textChunk;
-            textInThisStream += textChunk;
+            accumulatedText += textChunk;  // 保留 [done] 用于检查
+            textInThisStream += cleanedText;  // 记录实际输出给客户端的文本
         }
 
         // 优化点4：重构`finishReason`提取，使其不再依赖于原始line，而是直接从已解析的payload中获取，更高效可靠。
@@ -888,7 +934,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
     } finally {
       cleanup(currentReader);
       currentReader = null;
-      logDebug(`Stream attempt summary: Duration: ${Date.now() - streamStartTime}ms, Lines: ${linesInThisStream}, Chars: ${textInThisStream.length}`);
+      logDebug(`Stream attempt summary: Duration: ${Date.now() - streamStartTime}ms, Lines: ${linesInThisStream}, Chars sent to client: ${textInThisStream.length}`);
     }
 
     // if (cleanExit) {
