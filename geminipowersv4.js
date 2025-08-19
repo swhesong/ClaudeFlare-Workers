@@ -25,7 +25,93 @@ const NON_RETRYABLE_STATUSES = new Set([400, 401, 403, 404, 429]);
 // If a stream stops with "finishReason: STOP" but the last character is not in this set,
 // it will be treated as an incomplete generation and trigger a retry.
 const FINAL_PUNCTUATION = new Set(['.', '?', '!', '。', '？', '！', '}', ']', ')', '"', "'", '”', '’', '`', '\n']);
+// ============ 新增的 oneof 冲突处理函数 ============
+function resolveOneofConflicts(body) {
+  // 创建深拷贝避免修改原始对象
+  const cleanBody = JSON.parse(JSON.stringify(body));
+  
+  // 定义所有可能的 oneof 字段映射
+  const oneofMappings = [
+    ['_system_instruction', 'systemInstruction'],
+    ['_generation_config', 'generationConfig'], 
+    ['_contents', 'contents'],
+    ['_model', 'model'],
+    ['_tools', 'tools'],
+    ['_tool_config', 'toolConfig']
+  ];
+  
+  let conflictsResolved = 0;
+  
+  // 遍历所有可能的 oneof 冲突
+  for (const [privateField, publicField] of oneofMappings) {
+    const hasPrivate = privateField in cleanBody;
+    const hasPublic = publicField in cleanBody;
+    
+    if (hasPrivate && hasPublic) {
+      // 优先保留私有字段（下划线开头的），删除公共字段
+      delete cleanBody[publicField];
+      conflictsResolved++;
+      logWarn(`Oneof conflict resolved: removed '${publicField}' due to '${privateField}'`);
+    }
+  }
+  
+  // 处理特殊的 generation_config (snake_case) 冲突
+  const hasSnakeCase = 'generation_config' in cleanBody;
+  const hasCamelCase = 'generationConfig' in cleanBody;
+  
+  if (hasSnakeCase && hasCamelCase) {
+    // 优先保留 camelCase 版本
+    delete cleanBody.generation_config;
+    conflictsResolved++;
+    logWarn("Resolved generation_config naming conflict: removed snake_case version");
+  } else if (hasSnakeCase && !hasCamelCase) {
+    // 如果只有 snake_case，转换为 camelCase
+    cleanBody.generationConfig = cleanBody.generation_config;
+    delete cleanBody.generation_config;
+    logInfo("Normalized generation_config to generationConfig");
+  }
+  
+  if (conflictsResolved > 0) {
+    logInfo(`Total oneof conflicts resolved: ${conflictsResolved}`);
+  }
+  
+  return cleanBody;
+}
 
+function validateRequestBody(body, context = "request") {
+  try {
+    // 检查必需字段
+    if (!body.contents || !Array.isArray(body.contents)) {
+      throw new Error("Missing or invalid 'contents' array");
+    }
+    
+    // 检查 oneof 冲突
+    const oneofChecks = [
+      ['_system_instruction', 'systemInstruction'],
+      ['_generation_config', 'generationConfig'],
+      ['_contents', 'contents'],
+      ['_model', 'model'],
+      ['_tools', 'tools'],
+      ['_tool_config', 'toolConfig']
+    ];
+    
+    for (const [privateField, publicField] of oneofChecks) {
+      if (privateField in body && publicField in body) {
+        throw new Error(`Oneof conflict detected: both '${privateField}' and '${publicField}' present`);
+      }
+    }
+    
+    // 序列化测试
+    const serialized = JSON.stringify(body);
+    JSON.parse(serialized);
+    
+    logDebug(`${context} body validation passed`);
+    return true;
+  } catch (e) {
+    logError(`${context} body validation failed:`, e.message);
+    return false;
+  }
+}
 
 const logDebug = (...args) => { if (CONFIG.debug_mode) console.log(`[DEBUG ${new Date().toISOString()}]`, ...args); };
 const logInfo  = (...args) => console.log(`[INFO ${new Date().toISOString()}]`, ...args);
@@ -1009,64 +1095,23 @@ async function handleStreamingPost(request) {
   logInfo(`Content-Type: ${request.headers.get("content-type")}`);
 
   // Integrated stable JSON parsing logic
-  let body;
+  let rawBody;
   try {
-    body = await request.json();
-    logDebug(`Parsed request body with ${body.contents?.length || 0} messages`);
+    rawBody = await request.json();
+    logDebug(`Parsed request body with ${rawBody.contents?.length || 0} messages`);
   } catch (e) {
     logError("Failed to parse request body:", e.message);
     return jsonError(400, "Invalid JSON in request body", { error: e.message });
   }
 
-  // --- START: Atomic & Sequential Request Body Processing ---
-  // All modifications to the request body are centralized here to guarantee consistency
-  // and completely eliminate the 'oneof' error by finalizing the body *before* it's used.
-
-  // Step 1: Normalize naming: 'generation_config' (snake_case) is handled.
-  const hasSnakeCase = 'generation_config' in body;
-  const hasCamelCase = 'generationConfig' in body;
-
-  if (hasSnakeCase) {
-    if (hasCamelCase) {
-      // If both exist, prioritize the official camelCase version.
-      logWarn("Naming conflict: Both 'generationConfig' and 'generation_config' found. Removing 'generation_config'.");
-      delete body.generation_config;
-    } else {
-      // If only snake_case exists, normalize it to camelCase for internal consistency.
-      logInfo("Normalizing 'generation_config' to 'generationConfig' for compatibility.");
-      body.generationConfig = body.generation_config;
-      delete body.generation_config;
-    }
-  }
-
-  // Step 2: Proactively resolve all client-side 'oneof' field conflicts.
-  // =============================================================
-  // This represents the ideal, complete logic flow.
-  // =============================================================
-  // Step 2.1: Resolve potential 'oneof' conflict between 'systemInstruction' and '_system_instruction'.
-  // This step ensures the 'body' object is in a valid state before proceeding.
-  // The '_system_instruction' field is prioritized as it reflects the underlying API structure.
-  if (body.systemInstruction && body._system_instruction) {
-    logWarn("Conflict detected: Both 'systemInstruction' and '_system_instruction' found. Prioritizing '_system_instruction' and removing the other.");
-    delete body.systemInstruction;
-  }
+  // --- START: Enhanced Atomic & Sequential Request Body Processing ---
+  // 🔥 使用增强的 oneof 冲突解决函数替换原有的手动处理逻辑
+  logInfo("=== RESOLVING ONEOF CONFLICTS ===");
+  const body = resolveOneofConflicts(rawBody);
   
-  // Step 2.2: Resolve other oneof conflicts
-  const hasUnderscoreGenerationConfig = '_generation_config' in body;
-  const hasUnderscoreContents = '_contents' in body;
-  const hasUnderscoreModel = '_model' in body;
-  
-  if (hasUnderscoreGenerationConfig && 'generationConfig' in body) {
-    delete body.generationConfig;
-    logInfo("Oneof conflict resolved: removed generationConfig due to _generation_config");
-  }
-  if (hasUnderscoreContents && 'contents' in body) {
-    delete body.contents;
-    logInfo("Oneof conflict resolved: removed contents due to _contents");
-  }
-  if (hasUnderscoreModel && 'model' in body) {
-    delete body.model;
-    logInfo("Oneof conflict resolved: removed model due to _model");
+  // 额外的验证步骤
+  if (!validateRequestBody(body, "cleaned request")) {
+    return jsonError(400, "Request body validation failed after conflict resolution");
   }
 
   // Step 3: Conditionally inject the system prompt *after* all conflicts are resolved.
@@ -1178,7 +1223,6 @@ async function handleStreamingPost(request) {
     }
   });
 }
-
 async function handleNonStreaming(request) {
   const url = new URL(request.url);
   const upstreamUrl = `${CONFIG.upstream_url_base}${url.pathname}${url.search}`;
@@ -1251,6 +1295,29 @@ async function handleRequest(request, env) {
           headers: { 'Content-Type': 'text/plain; charset=utf-8' }
         }
       );
+    }
+    // ======================= 🔧 新增 Favicon 处理逻辑 🔧 =======================
+    if (request.method === "GET" && url.pathname === "/favicon.ico") {
+      logDebug("Handling favicon.ico request - returning 204 No Content");
+      return new Response(null, { 
+        status: 204,
+        headers: {
+          'Cache-Control': 'public, max-age=86400', // 缓存1天
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+    
+    // ======================= 🔧 可选：添加 robots.txt 处理 🔧 =======================
+    if (request.method === "GET" && url.pathname === "/robots.txt") {
+      logDebug("Handling robots.txt request");
+      return new Response("User-agent: *\nDisallow: /", {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Cache-Control': 'public, max-age=86400'
+        }
+      });
     }
     // ======================================================================
     const alt = url.searchParams.get("alt");
