@@ -1,3 +1,5 @@
+// [LOG-INJECTION] SCRIPT VERSION CHECK: This is the definitive version identifier.
+console.log("--- SCRIPT VERSION: FINAL-DEBUG-V2 ---");
 /**
  * @fileoverview Cloudflare Worker proxy for Gemini API with robust streaming retry and standardized error responses.
  * Handles model's "thought" process and can filter thoughts after retries to maintain a clean output stream.
@@ -40,43 +42,35 @@ function resolveOneofConflicts(body) {
     ['_tool_config', 'toolConfig']
   ];
   
-  let conflictsResolved = 0;
-  
-  // 遍历所有可能的 oneof 冲突
+  // 遍历所有可能的 oneof 字段，执行“独裁”覆盖规则
   for (const [privateField, publicField] of oneofMappings) {
-    const hasPrivate = privateField in cleanBody;
-    const hasPublic = publicField in cleanBody;
-    
-    if (hasPrivate && hasPublic) {
-      // 优先保留私有字段（下划线开头的），删除公共字段
-      delete cleanBody[publicField];
-      conflictsResolved++;
-      logWarn(`Oneof conflict resolved: removed '${publicField}' due to '${privateField}'`);
+    // 只要私有字段存在，无论其值是什么，它都拥有最高权威
+    if (privateField in cleanBody) {
+      // [LOG-INJECTION] Announcing conflict resolution action.
+      logError(`[DIAGNOSTIC-LOG] RESOLVING CONFLICT: Found '${privateField}'. Forcibly overwriting '${publicField}' and deleting the private field.`);
+      // 1. 无条件覆盖：私有字段的值将强制覆盖公共字段。
+      cleanBody[publicField] = cleanBody[privateField];
+      
+      // 2. 无条件删除：完成使命后，删除私有字段。
+      delete cleanBody[privateField];
+      
+      logWarn(`Authoritative override: Field '${privateField}' has overwritten '${publicField}'. The private field has been removed.`);
     }
   }
   
-  // 处理特殊的 generation_config (snake_case) 冲突
+  // --- 对 generation_config 的特殊处理 ---
+  // 这个字段有两种命名法 (snake_case vs camelCase)，也需要强制统一
   const hasSnakeCase = 'generation_config' in cleanBody;
-  const hasCamelCase = 'generationConfig' in cleanBody;
-  
-  if (hasSnakeCase && hasCamelCase) {
-    // 优先保留 camelCase 版本
-    delete cleanBody.generation_config;
-    conflictsResolved++;
-    logWarn("Resolved generation_config naming conflict: removed snake_case version");
-  } else if (hasSnakeCase && !hasCamelCase) {
-    // 如果只有 snake_case，转换为 camelCase
-    cleanBody.generationConfig = cleanBody.generation_config;
-    delete cleanBody.generation_config;
-    logInfo("Normalized generation_config to generationConfig");
+  if (hasSnakeCase) {
+      // 同样采用覆盖规则：snake_case 版本覆盖 camelCase 版本
+      cleanBody.generationConfig = cleanBody.generation_config;
+      delete cleanBody.generation_config;
+      logWarn("Authoritative override: Field 'generation_config' has been normalized to 'generationConfig'.");
   }
-  
-  if (conflictsResolved > 0) {
-    logInfo(`Total oneof conflicts resolved: ${conflictsResolved}`);
-  }
-  
+
   return cleanBody;
 }
+
 
 function validateRequestBody(body, context = "request") {
   try {
@@ -97,6 +91,8 @@ function validateRequestBody(body, context = "request") {
     
     for (const [privateField, publicField] of oneofChecks) {
       if (privateField in body && publicField in body) {
+        // [LOG-INJECTION] This is a critical failure point. If this log appears, the script logic itself has failed.
+        logError(`[DIAGNOSTIC-LOG] FATAL VALIDATION ERROR in context '${context}': Conflict detected between '${privateField}' and '${publicField}'. THIS SHOULD NOT HAPPEN.`);
         throw new Error(`Oneof conflict detected: both '${privateField}' and '${publicField}' present`);
       }
     }
@@ -771,29 +767,22 @@ class RecoveryStrategist {
         logWarn(`Applying retry strategy: ${isContentIssue ? 'CONTENT_ISSUE_RECOVERY' : 'SEAMLESS_CONTINUATION'}`);
     }
 
-    // 使用可能被修改过的 textForModel 来构建请求体
-    const retryBody = buildRetryRequestBody(this.originalRequestBody, textForModel, retryPrompt);
+    // 阶段 1: 使用辅助函数构建基础的重试请求体
+    // 注意：我们将 retryBody 从 const 改为 let，以便可以重新赋值
+    let retryBody = buildRetryRequestBody(this.originalRequestBody, textForModel, retryPrompt);
 
-    // ============ Final safety check: Ensure retry request compliance ============
-    // Defense-in-depth: Remove any potential oneof conflicts as a safety measure
-    const oneofFields = [
-      ['_system_instruction', 'systemInstruction'],
-      ['_generation_config', 'generationConfig'], 
-      ['_contents', 'contents'],
-      ['_model', 'model']
-    ];
+    // 阶段 2: 【决定性修复】调用唯一的、权威的清理函数
+    // 彻底替换掉之前所有内部的、有缺陷的检查逻辑
+    logInfo("Applying authoritative conflict resolution to the retry request body...");
+    retryBody = resolveOneofConflicts(retryBody);
     
-    for (const [privateField, publicField] of oneofFields) {
-      if (privateField in retryBody && publicField in retryBody) {
-        delete retryBody[publicField];
-        logDebug(`Safety cleanup in retry body: removed ${publicField}`);
-      }
+    // (可选，但推荐) 阶段 3: 在发送前增加一次最终验证，用于调试
+    if (!validateRequestBody(retryBody, "final retry body")) {
+        logError("FATAL: Retry body failed validation right before sending!");
     }
-    
+
     return retryBody;
   }
-
-
   /** 获取下一次行动的指令 */
   getNextAction(accumulatedText) {
     if (this.consecutiveRetryCount > CONFIG.max_consecutive_retries) {
@@ -1088,12 +1077,10 @@ async function handleStreamingPost(request) {
   const requestUrl = new URL(request.url);
   // Robust URL construction to prevent issues with trailing/leading slashes.
   const upstreamUrl = `${CONFIG.upstream_url_base}${requestUrl.pathname}${requestUrl.search}`;
-
   logInfo(`=== NEW STREAMING REQUEST ===`);
   logInfo(`Upstream URL: ${upstreamUrl}`);
   logInfo(`Request method: ${request.method}`);
   logInfo(`Content-Type: ${request.headers.get("content-type")}`);
-
   // Integrated stable JSON parsing logic
   let rawBody;
   try {
@@ -1103,52 +1090,50 @@ async function handleStreamingPost(request) {
     logError("Failed to parse request body:", e.message);
     return jsonError(400, "Invalid JSON in request body", { error: e.message });
   }
-
-  // --- START: Enhanced Atomic & Sequential Request Body Processing ---
-  // 🔥 使用增强的 oneof 冲突解决函数替换原有的手动处理逻辑
-  logInfo("=== RESOLVING ONEOF CONFLICTS ===");
-  const body = resolveOneofConflicts(rawBody);
-  
-  // 额外的验证步骤
-  if (!validateRequestBody(body, "cleaned request")) {
-    return jsonError(400, "Request body validation failed after conflict resolution");
-  }
-
-  // Step 3: Conditionally inject the system prompt *after* all conflicts are resolved.
-  // This is the single, authoritative injection point. Because Step 2 has cleaned the data,
-  // this logic can be simple and clear without extra defensive checks.
+  // [LOG-INJECTION] STEP 1: Log the raw, untouched request body from the client.
+  logError("[DIAGNOSTIC-LOG] STEP 1: RAW INCOMING BODY FROM CLIENT:", JSON.stringify(rawBody, null, 2));
+  // --- START: 全新的、原子化的请求体处理流程 ---
+  // 阶段 1: 立即执行权威性的冲突解决。
+  // 这是最关键的一步，确保我们从一个干净、无冲突的 body 开始。
+  logInfo("=== Performing immediate authoritative oneof conflict resolution ===");
+  let body = resolveOneofConflicts(rawBody); // 直接对原始请求体进行清理
+  // [LOG-INJECTION] STEP 2: Log the body immediately after conflict resolution.
+  logError("[DIAGNOSTIC-LOG] STEP 2: BODY AFTER 'resolveOneofConflicts':", JSON.stringify(body, null, 2));
+  // 阶段 2: 按需注入系统指令。
+  // 现在我们可以安全地检查和注入，因为 body 已经没有冲突了。
   if (CONFIG.system_prompt_injection) {
-    const systemInstructionExists = body.systemInstruction || body._system_instruction;
-    if (!systemInstructionExists) {
-      logInfo("Injecting system prompt: " + CONFIG.system_prompt_injection);
+    // 检查清理后的 body 是否包含 systemInstruction
+    if (!body.systemInstruction && !body.system_instruction) {
+      logInfo("Injecting system prompt because 'systemInstruction' is missing after cleanup.");
       body.systemInstruction = {
         parts: [{ text: CONFIG.system_prompt_injection }]
       };
+      // [LOG-INJECTION] STEP 3a: Announce that injection occurred.
+      logError("[DIAGNOSTIC-LOG] STEP 3a: System prompt has been INJECTED.");
     } else {
-      const existingField = body.systemInstruction ? 'systemInstruction' : '_system_instruction';
-      logWarn(`System instruction already exists in request (found '${existingField}'), skipping injection.`);
+      // 如果清理后仍然存在，说明它是合法的，我们跳过注入。
+      logWarn("Request already contains a valid system instruction, skipping injection.");
+      // [LOG-INJECTION] STEP 3b: Announce that injection was skipped.
+      logError("[DIAGNOSTIC-LOG] STEP 3b: System prompt injection was SKIPPED.");
     }
   }
-  // =============================================================
-  // End of the logic flow.
-  // =============================================================
-  // =============================================================
-
+  // [LOG-INJECTION] STEP 4: Log the body after the injection logic has completed.
+  logError("[DIAGNOSTIC-LOG] STEP 4: BODY AFTER INJECTION LOGIC:", JSON.stringify(body, null, 2));
+  // 阶段 3: 在发送请求前进行最终验证。
+  if (!validateRequestBody(body, "final cleaned request")) {
+    // 这一步现在更像是一个安全网，理论上不应该失败。
+    return jsonError(400, "Request body failed final validation after cleanup and injection.");
+  }
+  
+  // --- END of the new logic flow ---
   // --- Robust Logging for Advanced Feature Awareness ---
-  // We log the client's intent directly from the request body, which is the sole determinant
-  // for activating advanced features. This approach removes the fragile dependency on parsing
-  // model versions from the URL, making our logging more reliable and future-proof.
   const thoughtsEnabledByClient = body.generationConfig?.thinkingConfig?.includeThoughts === true;
-
   if (thoughtsEnabledByClient) {
     logInfo(`'includeThoughts' is enabled by client. Advanced recovery features (e.g., thought swallowing) are potentially active.`);
   } else {
     logInfo(`'includeThoughts' is not enabled by client. Advanced recovery features will be inactive.`);
   }
-
-// Step 4: Finalize the request body by serializing it once for efficiency.
-  // This serialized version will be used for both the initial request and for
-  // creating a deep clone for the retry strategist.
+  // Finalize the request body by serializing it once for efficiency.
   let serializedBody;
   try {
     serializedBody = JSON.stringify(body);
@@ -1160,6 +1145,9 @@ async function handleStreamingPost(request) {
     return jsonError(400, "Malformed request body", e.message);
   }
   
+  // [LOG-INJECTION] STEP 5: This is the absolute final payload being sent to Google. This is the most critical log.
+  logError("[DIAGNOSTIC-LOG] STEP 5: FINAL SERIALIZED PAYLOAD SENT TO GOOGLE:", serializedBody);
+  
   const originalRequestBody = JSON.parse(serializedBody); // For the strategist
   
   logInfo("=== MAKING INITIAL REQUEST ===");
@@ -1167,7 +1155,7 @@ async function handleStreamingPost(request) {
   const initialRequest = new Request(upstreamUrl, /** @type {any} */ ({
     method: request.method,
     headers: initialHeaders,
-    body: serializedBody, // Use the single pre-serialized body
+    body: serializedBody,
     duplex: "half"
   }));
 
@@ -1178,16 +1166,13 @@ async function handleStreamingPost(request) {
   logInfo(`Initial request completed in ${dt}ms`);
   logInfo(`Initial response status: ${initialResponse.status} ${initialResponse.statusText}`);
 
-  // Initial failure: return non-200 JSON error (do not start SSE)
   if (!initialResponse.ok) {
     logError(`=== INITIAL REQUEST FAILED ===`);
     logError(`Status: ${initialResponse.status}`);
     logError(`Status Text: ${initialResponse.statusText}`);
     
-
     return await standardizeInitialError(initialResponse);
   }
-
 
   logInfo("=== INITIAL REQUEST SUCCESSFUL - STARTING STREAM PROCESSING ===");
   const initialReader = initialResponse.body?.getReader();
@@ -1223,6 +1208,7 @@ async function handleStreamingPost(request) {
     }
   });
 }
+
 async function handleNonStreaming(request) {
   const url = new URL(request.url);
   const upstreamUrl = `${CONFIG.upstream_url_base}${url.pathname}${url.search}`;
