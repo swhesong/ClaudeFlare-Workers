@@ -191,7 +191,8 @@ async function standardizeInitialError(initialResponse) {
   // Enhanced safe error reading mechanism with a modern timeout API
   try {
     // 使用 Promise.race 实现超时，避免 AbortSignal.timeout() 兼容性问题
-    const textPromise = initialResponse.clone().text();
+    const clonedResponse = initialResponse.clone();
+    const textPromise = clonedResponse.text();
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Timeout reading response body')), 5000)
     );
