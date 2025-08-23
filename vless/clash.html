@@ -1,1 +1,36 @@
+# Clash Verge 配置文件基础模板
+
+# 代理服务器监听端口
+port: 7890
+socks-port: 7891
+allow-lan: true
+mode: rule
+log-level: info
+external-controller: '127.0.0.1:9090'
+
+# 核心！在这里放入您的代理节点信息
+proxies:
+  # 下面是为您量身定制的 Hysteria2 节点配置
+  - name: "Hysteria2-ChiangMa"             # 节点名字，可以随便改
+    type: hysteria2                   # 类型，必须是 hysteria2
+    server: chiangma.dpdns.org        # 您的服务器地址
+    port: 8443                        # 您的服务器端口
+    password: "7SK6543"            # 您的密码
+    sni: chiangma.dpdns.org           # 您的 SNI，必须和域名一致
+    alpn:
+      - h3
+    skip-cert-verify: false           # 我们有证书，所以不跳过验证
+
+# 代理组，用于在Clash中选择节点
+proxy-groups:
+  - name: "🚀 节点选择"
+    type: select
+    proxies:
+      - "Hysteria2-ChiangMa"              # 把上面定义的节点名字放在这里
+      - DIRECT                       # DIRECT 表示直连
+
+# 分流规则
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,🚀 节点选择
 
