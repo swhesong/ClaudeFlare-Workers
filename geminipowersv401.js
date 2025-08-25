@@ -12,7 +12,7 @@ const UPSTREAM_ERROR_LOG_TRUNCATION = 2000;
 const FAILED_PARSE_LOG_TRUNCATION = 500;
 const CONFIG = {
   upstream_url_base: "https://generativelanguage.googleapis.com",
-  upstream_pro_url_base: "https://generativelanguage.googleapis.com",
+  upstream_pro_url_base: "https://api-proxy.me/gemini",
   max_consecutive_retries: 10,
   debug_mode: false,
   retry_delay_ms: 1200,
