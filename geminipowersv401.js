@@ -12,7 +12,7 @@ const UPSTREAM_ERROR_LOG_TRUNCATION = 2000;
 const FAILED_PARSE_LOG_TRUNCATION = 500;
 const CONFIG = {
   upstream_url_base: "https://generativelanguage.googleapis.com",
-  upstream_pro_url_base: "https://api-proxy.me/gemini",
+  upstream_pro_url_base: "https://generativelanguage.googleapis.com",
   max_consecutive_retries: 10,
   debug_mode: false,
   retry_delay_ms: 1200,
@@ -48,10 +48,13 @@ const CONFIG = {
 4.  **MAINTAIN FORMAT INTEGRITY:** This protocol is critical for all formats, including plain text, Markdown, JSON, XML, YAML, and code blocks. Your continuation must maintain perfect syntactical validity. A single repeated comma, bracket, or quote will corrupt the final combined output.
 
 5.  **FINAL TOKEN:** Upon successful and complete generation of the remaining content, append '${ABSOLUTE_FINISH_TOKEN}' to the absolute end of your response.
+
 ---
 **Illustrative Examples:**
 
+---
 ### Example 1: JSON
+
 **Scenario:** The incomplete response is a JSON object that was cut off inside a string value.
 \`\`\`json
 {
@@ -68,41 +71,85 @@ const CONFIG = {
 e",
     "roles": ["editor", "viewer"]
   }
-}
-\`\`\`${ABSOLUTE_FINISH_TOKEN}
+}${ABSOLUTE_FINISH_TOKEN}
 
+**INCORRECT Continuation Output (Protocol Failure):**
+"active", "roles": ["editor", "viewer"]...
+*(Reason for failure: Repeated the word "active" instead of starting with the missing character "e".)*
+
+**INCORRECT Continuation Output (Protocol Failure):**
+Here is the rest of the JSON object:
+e",
+    "roles": ["editor", "viewer"]
+  }
+}${ABSOLUTE_FINISH_TOKEN}
+*(Reason for failure: Included a preamble.)*
+
+---
 ### Example 2: XML
-**Scenario:** Incomplete XML document cut off mid-tag.
+
+**Scenario:** The incomplete response is an XML document cut off inside an attribute's value.
 \`\`\`xml
-<config>
-  <database>
-    <host>localhost</host>
-    <port>5432</port>
-    <name>prod_
+<?xml version="1.0" encoding="UTF-8"?>
+<order>
+  <id>ORD-001</id>
+  <customer status="gol
 \`\`\`
 
-**CORRECT Continuation:**
-db</name>
-  </database>
-</config>
-\`\`\`${ABSOLUTE_FINISH_TOKEN}
+**CORRECT Continuation Output:**
+d">
+    <name>John Doe</name>
+  </customer>
+</order>${ABSOLUTE_FINISH_TOKEN}
 
+**INCORRECT Continuation Output (Protocol Failure):**
+"gold">
+    <name>John Doe</name>...
+*(Reason for failure: Repeated the quote character and the word "gold".)*
+
+---
 ### Example 3: Python Code
-**Scenario:** Function definition cut off mid-line.
+
+**Scenario:** The incomplete response ends with the following Python code snippet:
 \`\`\`python
-def calculate_metrics(data):
-    results = {}
-    for item in data:
-        if item['status'] == 'act
+for user in user_list:
+    print(f"Processing user: {user.na
 \`\`\`
 
-**CORRECT Continuation:**
-ive':
-            results[item['id']] = item['value'] * 2
-    return results
-\`\`\`${ABSOLUTE_FINISH_TOKEN}
+**CORRECT Continuation Output:**
+me})${ABSOLUTE_FINISH_TOKEN}
 
-**Remember:** Your success is measured by the ability to produce a seamless, syntactically perfect completion that, when combined with the original incomplete text, forms a coherent and valid final output.`,  // ✅ REPLACEMENT 2: Enhanced system_prompt_injection with cognitive reset protocol
+**INCORRECT Continuation Output (Protocol Failure):**
+user.name})${ABSOLUTE_FINISH_TOKEN}
+*(Reason for failure: Repeated the word "user".)*
+
+---
+### Example 4: JSON (Interruption After Symbol)
+
+**Scenario:** The incomplete response is a JSON object that was cut off immediately after a comma separating two key-value pairs.
+\`\`\`json
+{
+  "user": "admin",
+  "permissions": {
+    "read": true,
+    "write": false,
+  
+\`\`\`
+
+**CORRECT Continuation Output (Note the required indentation):**
+
+    "execute": false
+  }
+}${ABSOLUTE_FINISH_TOKEN}
+
+**INCORRECT Continuation Output (Protocol Failure):**
+,
+    "execute": false
+  }
+}${ABSOLUTE_FINISH_TOKEN}
+*(Reason for failure: Repeated the trailing comma from the previous turn.)*`,
+
+
   system_prompt_injection: `# --- SYSTEM MANDATE: FINAL OUTPUT PROTOCOL ---
 
 ## 1. ABSOLUTE RULE
@@ -936,8 +983,8 @@ recordInterruption(reason, accumulatedText) {
             const snippet2 = lastThreeSnippets[1];
             const snippet3 = lastThreeSnippets[2];
             
-            // 如果最后三个片段都完全相同，则判定为重复循环
-            if (snippet1 === snippet2 && snippet1 === snippet3) {
+            // If any two of the last three snippets are identical, detect potential repetitive loop
+            if (snippet1 === snippet2 || snippet1 === snippet3 || snippet2 === snippet3) {
                 logError(`Advanced Heuristic Triggered (Rule 5): Repetitive content loop detected. Snippet: "${snippet1}". Assuming content issue.`);
                 return true;
             }
@@ -1357,8 +1404,25 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               }
           }
           
+          // NEW: Enhanced client compatibility fix inspired by Project B.
+          // If a data chunk contains ONLY thoughts and no formal text, Gemini might incorrectly add a "finishReason".
+          // Some clients (like Cherry Studio) will prematurely stop rendering upon seeing any finishReason.
+          // This logic removes the premature finishReason from thought-only chunks to ensure client compatibility.
+          const hasOnlyThoughts = isThought && (!textChunk || textChunk.length === 0);
+          if (hasOnlyThoughts && payload?.candidates?.[0]?.finishReason) {
+              logWarn(`[COMPATIBILITY-FIX] Removing premature finishReason '${payload.candidates[0].finishReason}' from a thought-only chunk to prevent client errors.`);
+              // Create a deep copy to avoid side effects
+              const cleanedPayload = structuredClone(payload);
+              delete cleanedPayload.candidates[0].finishReason;
+              const cleanedLine = `data: ${JSON.stringify(cleanedPayload)}`;
+              // Forward the cleaned line immediately and skip further processing for this line.
+              // We use the lookahead buffer to maintain stream order.
+              lookaheadLinesBuffer.push({ line: cleanedLine + "\n\n", textLength: 0, isData: true });
+              // Do not add to textBuffer as it's not formal content.
+              continue;
+          }
           
-          // 🔥 Key modification: If contains finish marker, send cleaned version to client
+          // Key modification: If contains finish marker, send cleaned version to client
           if (hasFinishMarker && cleanedText !== textChunk) {
               const cleanLine = rebuildDataLine(payload, cleanedText);
               if (cleanLine) {
@@ -1419,14 +1483,13 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                       break;
                   case "SAFETY":
                   case "RECITATION":
-                      interruptionReason = `FINISH_${finishReason}`;
-                      break;
-
-                  case "MAX_TOKENS":
-                      // CRITICAL FIX - MAX_TOKENS indicates an incomplete response that was truncated.
-                      // It must be treated as an interruption that requires a retry, not a successful completion.
-                      logWarn(`Finish reason is MAX_TOKENS. The response is incomplete and will trigger a retry.`);
-                      interruptionReason = "FINISH_INCOMPLETE"; // Classify it as incomplete to trigger continuation logic.
+                  case "MAX_TOKENS": // Group MAX_TOKENS with other interruption reasons
+                      interruptionReason = (finishReason === "MAX_TOKENS") 
+                          ? "FINISH_INCOMPLETE" 
+                          : `FINISH_${finishReason}`;
+                      if (finishReason === "MAX_TOKENS") {
+                          logWarn(`Finish reason is MAX_TOKENS. The response is incomplete and will trigger a retry.`);
+                      }
                       break;
 
 
@@ -1469,20 +1532,25 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                   const { line, textLength } = lookaheadLinesBuffer[0];
                   if (forwardedTextLength + textLength <= safeTextLength) {
                       const lineInfo = lookaheadLinesBuffer.shift();
+                      
+                      // Process data lines to maintain context synchronization
+                      if (lineInfo.isData) {
+                          const parseResult = parseLineContent(lineInfo.line.replace(/\n\n$/, ''));
+                          if (parseResult) {
+                              // CRITICAL BUG FIX: Ensure accumulatedText includes all flushed content
+                              // This synchronization is essential for accurate retry context generation
+                              // Without this, retry requests may be based on incomplete text history
+                              if (parseResult.text && !parseResult.isThought) {
+                                  accumulatedText += parseResult.text;
+                              }
+                              if (parseResult.cleanedText) {
+                                  textInThisStream += parseResult.cleanedText;
+                              }
+                          }
+                      }
+                      
                       linesToWrite.push(lineInfo.line);
                       forwardedTextLength += lineInfo.textLength;
-                    if (lineInfo.isData) {
-                        const parseResult = parseLineContent(lineInfo.line.replace(/\n\n$/, ''));
-                        if (parseResult) {
-                            if (parseResult.cleanedText) {
-                                textInThisStream += parseResult.cleanedText;
-                            }
-                            // **核心修复：**将刷新的内容同步到用于重试的全局状态变量
-                            if (parseResult.text && !parseResult.isThought) {
-                                accumulatedText += parseResult.text;
-                            }
-                        }
-                    }
                   } else {
                       break; // This line cannot be safely forwarded yet
                   }
@@ -1968,33 +2036,49 @@ async function handleStreamingPost(request) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
 
-  processStreamAndRetryInternally({
-    initialReader,
-    writer,
-    originalRequestBody,
-    upstreamUrl,
-    originalHeaders: request.headers,
-    requestId // 传递ID
-  }).catch(async (e) => {
-    logError(`[Request-ID: ${requestId}] === UNHANDLED EXCEPTION IN STREAM PROCESSOR ===`);
-    logError(`[Request-ID: ${requestId}] Exception:`, e.message);
-    logError(`[Request-ID: ${requestId}] Stack:`, e.stack);
-    // 向客户端发送错误信号，而不是静默中断连接
+  // Use IIFE (Immediately Invoked Function Expression) to manage stream lifecycle
+  (async () => {
     try {
-      const errorPayload = {
-        error: {
-          code: 500,
-          status: "INTERNAL",
-          message: "Stream processing failed unexpectedly",
-          details: [{ "@type": "proxy.fatal_error", error: e.message }]
+      // Wait for the entire stream processing to complete
+      await processStreamAndRetryInternally({
+        initialReader,
+        writer,
+        originalRequestBody,
+        upstreamUrl,
+        originalHeaders: request.headers,
+        requestId // Pass ID
+      });
+    } catch (e) {
+      logError(`[Request-ID: ${requestId}] === UNHANDLED EXCEPTION IN STREAM PROCESSOR ===`);
+      logError(`[Request-ID: ${requestId}] Exception:`, e.message);
+      logError(`[Request-ID: ${requestId}] Stack:`, e.stack);
+      // Try to write an error event to the client
+      try {
+        if (!writer.closed) {
+          const errorPayload = {
+            error: {
+              code: 500,
+              status: "INTERNAL",
+              message: "Stream processing failed unexpectedly",
+              details: [{ "@type": "proxy.fatal_error", error: e.message }]
+            }
+          };
+          await writer.write(SSE_ENCODER.encode(`event: error\ndata: ${JSON.stringify(errorPayload)}\n\n`));
         }
-      };
-      await writer.write(SSE_ENCODER.encode(`event: error\ndata: ${JSON.stringify(errorPayload)}\n\n`));
-    } catch (writeError) {
-      logError(`[Request-ID: ${requestId}] Failed to send error to client:`, writeError.message);
+      } catch (writeError) {
+        logError(`[Request-ID: ${requestId}] Failed to send error to client:`, writeError.message);
+      }
+    } finally {
+      // Whether successful or failed, always close the writer to signal stream end to client
+      try {
+        if (!writer.closed) {
+          await writer.close();
+        }
+      } catch (closeError) {
+        logError(`[Request-ID: ${requestId}] Error closing writer:`, closeError.message);
+      }
     }
-    try { writer.close(); } catch (_) {}
-  });
+  })(); // Immediately execute this async function
 
   logInfo(`[Request-ID: ${requestId}] Returning streaming response to client`);
   const responseHeaders = new Headers({
@@ -2003,8 +2087,9 @@ async function handleStreamingPost(request) {
       "Connection": "keep-alive",
       "Access-Control-Allow-Origin": "*"
   });
-  responseHeaders.set(CONFIG.request_id_header, requestId); // 在响应头中返回ID
+  responseHeaders.set(CONFIG.request_id_header, requestId); // Return ID in response headers
   return new Response(readable, { status: 200, headers: responseHeaders });
+  
 }
 
 async function handleNonStreaming(request) {
@@ -2033,26 +2118,29 @@ async function handleRequest(request, env) {
   try {
     // Stage 1: Robust Configuration Loading
     try {
-        for (const key in CONFIG) {
-            if (env && env[key] !== undefined) {
-                const envValue = env[key];
-                const originalType = typeof CONFIG[key];
-                
-                if (originalType === 'boolean') {
-                    CONFIG[key] = String(envValue).toLowerCase() === 'true';
-                } else if (originalType === 'number') {
-                    const num = Number(envValue);
-                    if (!isNaN(num) && num >= 0) {
-                        CONFIG[key] = num;
-                    } else {
-                        logWarn(`Invalid numeric config for ${key}: ${envValue}, keeping default`);
+        if (env) {
+            const typeConverters = {
+                'boolean': (v) => String(v).toLowerCase() === 'true',
+                'number': (v) => {
+                    const num = Number(v);
+                    return !isNaN(num) && num >= 0 ? num : undefined;
+                },
+                'string': (v) => String(v)
+            };
+            for (const key in CONFIG) {
+                if (env[key] !== undefined) {
+                    const originalType = typeof CONFIG[key];
+                    const converter = typeConverters[originalType];
+                    if (converter) {
+                        const convertedValue = converter(env[key]);
+                        if (convertedValue !== undefined) {
+                            CONFIG[key] = convertedValue;
+                            logDebug(`Config updated from env: ${key} = ${CONFIG[key]}`);
+                        } else {
+                            logWarn(`Invalid value for ${key}: ${env[key]}, keeping default.`);
+                        }
                     }
-                } else if (originalType === 'string') {
-                    CONFIG[key] = String(envValue);
-                } else {
-                    logWarn(`Unsupported config type for ${key}: ${originalType}, keeping original value`);
                 }
-                logDebug(`Config updated: ${key} = ${CONFIG[key]}`);
             }
         }
     } catch (configError) {
