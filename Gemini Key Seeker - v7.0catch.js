@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Gemini Key Seeker - v7.1 Final Edition
-// @name:en      Gemini Key Seeker - v7.1 Final Edition
+// @name         Gemini Key Seeker - v7.0 Final Edition
+// @name:en      Gemini Key Seeker - v7.0 Final Edition
 // @namespace    http://tampermonkey.net/
-// @version      7.1-optimized
+// @version      7.0-optimized
 // @description  【终极智能版 - 并行优化】一键完成所有操作！自动筛选"Status: 200"，然后使用并行后台(AJAX)模式进行抓取，速度提升70-90%，无需任何手动干预。
 // @description:en [Final Smart Edition] One-click to do it all! Automatically filters for "Status: 200" and then uses AJAX background mode for scraping, no manual intervention needed.
 // @author       You & AI
