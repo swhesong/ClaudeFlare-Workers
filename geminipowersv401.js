@@ -1386,9 +1386,19 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
           
           // <<< New logic: Detect and activate function call mode
           const hasFunctionCall = payload?.candidates?.[0]?.content?.parts?.some(p => p.functionCall || p.toolCode);
-          if (hasFunctionCall) {
-              logWarn(`[Request-ID: ${requestId}] FUNCTION CALL DETECTED. Activating passthrough mode. All further retry logic will be bypassed.`);
-              functionCallModeActive = true;
+          if (hasFunctionCall && !functionCallModeActive) {
+              logWarn(`[Request-ID: ${requestId}] FUNCTION CALL DETECTED. Switching to passthrough mode. All retry logic will be bypassed.`);
+              functionCallModeActive = true; // Activate passthrough mode
+
+              // --- CRITICAL FLUSH ---
+              // Immediately flush any content in the lookahead buffer to ensure the function call is not delayed.
+              if (lookaheadLinesBuffer.length > 0) {
+                  const linesToFlush = lookaheadLinesBuffer.map(item => item.line).join('');
+                  await safeWrite(SSE_ENCODER.encode(linesToFlush));
+                  logInfo(`[Request-ID: ${requestId}] Flushed ${lookaheadLinesBuffer.length} buffered lines to client before entering function call passthrough.`);
+                  lookaheadLinesBuffer = [];
+                  lookaheadTextBuffer = "";
+              }
           }
 
           // Optimization point 3: Put "thought swallowing" logic after successful parsing, ensuring only valid thought chunks are operated on
@@ -1422,7 +1432,26 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               continue;
           }
           
+          // NEW: Enhanced client compatibility fix inspired by Project B.
+          // If a data chunk contains ONLY thoughts and no formal text, Gemini might incorrectly add a "finishReason".
+          // Some clients (like Cherry Studio) will prematurely stop rendering upon seeing any finishReason.
+          // This logic removes the premature finishReason from thought-only chunks to ensure client compatibility.
+          const hasOnlyThoughts = isThought && (!textChunk || textChunk.length === 0);
+          if (hasOnlyThoughts && payload?.candidates?.[0]?.finishReason) {
+              logWarn(`[COMPATIBILITY-FIX] Removing premature finishReason '${payload.candidates[0].finishReason}' from a thought-only chunk to prevent client errors.`);
+              // Create a deep copy to avoid side effects
+              const cleanedPayload = structuredClone(payload);
+              delete cleanedPayload.candidates[0].finishReason;
+              const cleanedLine = `data: ${JSON.stringify(cleanedPayload)}`;
+              // Forward the cleaned line immediately and skip further processing for this line.
+              // We use the lookahead buffer to maintain stream order.
+              lookaheadLinesBuffer.push({ line: cleanedLine + "\n\n", textLength: 0, isData: true });
+              // Do not add to textBuffer as it's not formal content.
+              continue;
+          }
+          
           // Key modification: If contains finish marker, send cleaned version to client
+
           if (hasFinishMarker && cleanedText !== textChunk) {
               const cleanLine = rebuildDataLine(payload, cleanedText);
               if (cleanLine) {
@@ -1472,14 +1501,30 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                   case "STOP":
                       if (!strategist.isOutputtingFormalText) {
                           interruptionReason = "STOP_WITHOUT_ANSWER";
-                      } else if (!isGenerationComplete(accumulatedText, hasFinishMarker)) {
-                          // The check function no longer logs, so we add detailed logs here.
-                          const trimmedText = accumulatedText.trimEnd();
-                          logWarn(`Generation incomplete: No '${ABSOLUTE_FINISH_TOKEN}' marker found. Text ends with: "${trimmedText.slice(-50)}"`);
-                          logError(`Finish reason 'STOP' treated as incomplete based on completion checks. Triggering retry.`);
-                          interruptionReason = "FINISH_INCOMPLETE";
+                      } else {
+                          // Enhanced completion check: check current text chunk, accumulated text, and lookahead buffer
+                          const currentChunkComplete = isGenerationComplete(textChunk || "", hasFinishMarker);
+                          const accumulatedComplete = isGenerationComplete(accumulatedText, false);
+                          const bufferComplete = lookaheadTextBuffer && isGenerationComplete(lookaheadTextBuffer, false);
+                          
+                          const isComplete = currentChunkComplete || accumulatedComplete || bufferComplete;
+                          
+                          if (!isComplete) {
+                              // Enhanced logging for debugging
+                              const trimmedText = accumulatedText.trimEnd();
+                              logWarn(`Generation completion check details:`);
+                              logWarn(`  - Current chunk complete: ${currentChunkComplete} (hasFinishMarker: ${hasFinishMarker})`);
+                              logWarn(`  - Accumulated text complete: ${accumulatedComplete} (${accumulatedText.length} chars)`);
+                              logWarn(`  - Buffer complete: ${bufferComplete} (${lookaheadTextBuffer.length} chars)`);
+                              logWarn(`  - Text ends with: "${trimmedText.slice(-50)}"`);
+                              logError(`Finish reason 'STOP' treated as incomplete. Triggering retry.`);
+                              interruptionReason = "FINISH_INCOMPLETE";
+                          } else {
+                              logInfo(`Generation marked as complete. Completion source: chunk=${currentChunkComplete}, accumulated=${accumulatedComplete}, buffer=${bufferComplete}`);
+                          }
                       }
                       break;
+
                   case "SAFETY":
                   case "RECITATION":
                   case "MAX_TOKENS": // Group MAX_TOKENS with other interruption reasons
