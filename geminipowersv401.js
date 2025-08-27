@@ -591,7 +591,7 @@ function extractFinishReason(line) {
 }
 
 
-// Add helper function after parseLineContent:
+// Helper function to escape special characters for use in a regular expression.
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -669,8 +669,7 @@ function buildRetryRequestBody(originalBody, accumulatedText, retryPrompt) {
   logDebug(`Building retry request body. Accumulated text length: ${textLen}`);
   logDebug(`Accumulated text preview: ${textLen > 200 ? accumulatedText.substring(0, 200) + "..." : accumulatedText}`);
   
-
-  const retryBody = structuredClone(originalBody);
+  const retryBody = structuredClone ? structuredClone(originalBody) : JSON.parse(JSON.stringify(originalBody));
 
   const contents = retryBody.contents = retryBody.contents || [];
   
@@ -728,7 +727,7 @@ const TRUNCATION_VARIANCE_THRESHOLD = 50;
 const MAX_RETRY_DELAY_MS = 8000;
 class RecoveryStrategist {
   constructor(originalRequestBody, requestId = 'N/A') {
-    this.originalRequestBody = structuredClone(originalRequestBody);
+    this.originalRequestBody = structuredClone ? structuredClone(originalRequestBody) : JSON.parse(JSON.stringify(originalRequestBody));
     this.retryHistory = [];
     this.currentRetryDelay = CONFIG.retry_delay_ms;
     this.consecutiveRetryCount = 0;
