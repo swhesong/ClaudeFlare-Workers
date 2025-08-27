@@ -1266,6 +1266,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       let heartbeatCount = 0;
       let heartbeatFailures = 0;
       const heartbeatStartTime = Date.now();
+      let heartbeatInterval = null;
       
       heartbeatInterval = setInterval(() => {
           try {
