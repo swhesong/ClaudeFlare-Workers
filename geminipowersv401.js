@@ -187,7 +187,26 @@ This protocol is essential for an accessibility screen reader to detect response
   request_timeout_ms: 50000
 };
 
-// ============ NEW: UUID generation utility function ============
+// ==================== UTILITY AND LOGGING FUNCTIONS (MOVED UP) ====================
+const logDebug = (...args) => { if (CONFIG.debug_mode) console.log(`[DEBUG ${new Date().toISOString()}]`, ...args); };
+const logInfo  = (...args) => console.log(`[INFO ${new Date().toISOString()}]`, ...args);
+const logWarn  = (...args) => console.warn(`[WARN ${new Date().toISOString()}]`, ...args);
+const logError = (...args) => console.error(`[ERROR ${new Date().toISOString()}]`, ...args);
+const truncate = (s, n = 8000) => {
+  if (typeof s !== "string") return s;
+  return s.length > n ? `${s.slice(0, n)}... [truncated]` : s;
+};
+function sanitizeTextForJSON(text) {
+  // Use the built-in JSON stringifier, which is the most robust way to handle all
+  // necessary escaping for a string that will be embedded within a JSON structure.
+  if (typeof text !== 'string' || !text) return "";
+  
+  // JSON.stringify correctly escapes the string and wraps it in double quotes.
+  // We just need to remove the outer quotes to get the sanitized content.
+  const jsonString = JSON.stringify(text);
+  return jsonString.slice(1, -1);
+}
+
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     const r = Math.random() * 16 | 0;
@@ -282,24 +301,7 @@ function validateRequestBody(body, context = "request") {
   }
 }
 
-const logDebug = (...args) => { if (CONFIG.debug_mode) console.log(`[DEBUG ${new Date().toISOString()}]`, ...args); };
-const logInfo  = (...args) => console.log(`[INFO ${new Date().toISOString()}]`, ...args);
-const logWarn  = (...args) => console.warn(`[WARN ${new Date().toISOString()}]`, ...args);
-const logError = (...args) => console.error(`[ERROR ${new Date().toISOString()}]`, ...args);
-const truncate = (s, n = 8000) => {
-  if (typeof s !== "string") return s;
-  return s.length > n ? `${s.slice(0, n)}... [truncated]` : s;
-};
-function sanitizeTextForJSON(text) {
-  // Use the built-in JSON stringifier, which is the most robust way to handle all
-  // necessary escaping for a string that will be embedded within a JSON structure.
-  if (typeof text !== 'string' || !text) return "";
-  
-  // JSON.stringify correctly escapes the string and wraps it in double quotes.
-  // We just need to remove the outer quotes to get the sanitized content.
-  const jsonString = JSON.stringify(text);
-  return jsonString.slice(1, -1);
-}
+
 
 const handleOPTIONS = () => new Response(null, {
   headers: {
@@ -589,6 +591,10 @@ function extractFinishReason(line) {
 }
 
 
+// Add helper function after parseLineContent:
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 /**
  * Parses a "data:" line from an SSE stream to extract text content and determine if it's a "thought" chunk.
@@ -635,10 +641,7 @@ function parseLineContent(line) {
   }
 }
 
-// Add helper function after parseLineContent:
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+
 
 
 /**
@@ -647,7 +650,7 @@ function escapeRegExp(string) {
 function rebuildDataLine(payload, cleanedText) {
   try {
     // Deep clone the payload to avoid modifying the original
-    const cleanPayload = structuredClone(payload);
+    const cleanPayload = structuredClone ? structuredClone(payload) : JSON.parse(JSON.stringify(payload));
     
     // Update the text in the payload
     if (cleanPayload?.candidates?.[0]?.content?.parts?.[0]) {
@@ -1636,6 +1639,11 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         // <<< New logic: If in function call mode after stream ends, consider successful and exit
         if (functionCallModeActive) {
             logInfo(`[Request-ID: ${requestId}] === STREAM COMPLETED SUCCESSFULLY (in Function Call Passthrough Mode) ===`);
+            // CRITICAL FIX: Clear the heartbeat interval before early return to prevent resource leak.
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
             await safeClose();
             return;
         }
