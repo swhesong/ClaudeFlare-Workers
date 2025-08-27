@@ -1331,7 +1331,8 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       strategist.performanceMetrics.streamStartTimes.push(streamStartTime);
       strategist.resetPerStreamState();
       let linesInThisStream = 0;
-      let textInThisStream = "";
+      // let textInThisStream = "";
+      let charsSentInThisStream = 0;
 
       logInfo(`[Request-ID: ${requestId}] === Starting stream attempt ${attempt + 1} (Total retries so far: ${strategist.consecutiveRetryCount}) ===`);
       try {
@@ -1607,9 +1608,10 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                               if (parseResult.text && !parseResult.isThought) {
                                   accumulatedText += parseResult.text;
                               }
-                              // This correctly updates the counter for text sent in the current stream.
+                              // Update local counter for current flush operation only
                               if (parseResult.cleanedText) {
-                                  textInThisStream += parseResult.cleanedText;
+                                  forwardedTextLength += parseResult.cleanedText.length;
+                                  charsSentInThisStream += parseResult.cleanedText.length;
                               }
                           }
                       }
@@ -1638,32 +1640,32 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             return;
         }
 
-        // 🔥 Enhanced stream end diagnostics
+        // Enhanced stream end diagnostics
         if (!finishReasonArrived && !interruptionReason) {
           const streamDuration = Date.now() - streamStartTime;
           interruptionReason = strategist.streamState === "REASONING" ? "DROP_DURING_REASONING" : "DROP_UNEXPECTED";
           
-          logError(`[STREAM-PROCESSOR] 🚨 Stream ended without finish reason - CRITICAL DIAGNOSTIC:`);
+          logError(`[STREAM-PROCESSOR] Stream ended without finish reason - CRITICAL DIAGNOSTIC:`);
           logError(`  - Interruption type: ${interruptionReason}`);
           logError(`  - Stream state: ${strategist.streamState}`);
           logError(`  - Stream duration: ${streamDuration}ms`);
           logError(`  - Lines processed in this stream: ${linesInThisStream}`);
-          logError(`  - Total lines processed: ${totalLinesProcessed}`);
-          logError(`  - Text accumulated in this stream: ${textInThisStream.length} chars`);
-          logError(`  - Total accumulated text: ${accumulatedText.length} chars`);
+          logError(`  - Total lines processed so far: ${totalLinesProcessed}`);
+          logError(`  - Characters sent in this stream: ${charsSentInThisStream} chars`);
+          logError(`  - Total accumulated text (for retry): ${accumulatedText.length} chars`);
           logError(`  - Function call mode: ${functionCallModeActive}`);
           logError(`  - Swallow mode: ${swallowModeActive}`);
           
-          // 🔥 Analyze possible interruption causes
+          // Analyze possible interruption causes
           if (streamDuration < 1000) {
-            logError(`  - ⚠️ Very short stream duration - possible immediate connection drop`);
+            logError(`  - Very short stream duration - possible immediate connection drop`);
           } else if (linesInThisStream === 0) {
-            logError(`  - ⚠️ No lines processed - possible reader issue or empty response`);
+            logError(`  - No lines processed - possible reader issue or empty response`);
           } else if (streamDuration > 60000) {
-            logError(`  - ⚠️ Long stream duration - possible timeout or keep-alive issue`);
+            logError(`  - Long stream duration - possible timeout or keep-alive issue`);
           }
         }
-
+        
       } catch (e) {
         const streamDuration = Date.now() - streamStartTime;
         
@@ -1730,6 +1732,9 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             }
             
             if (finalLinesToWrite.length > 0) {
+                // Simplified counter update using locally computed value
+                charsSentInThisStream += charsInFinalFlush;
+                
                 // Use a non-blocking write for this final flush to avoid delaying the retry logic
                 safeWrite(SSE_ENCODER.encode(finalLinesToWrite.join('')))
                     .catch(e => logError("Error during final buffer flush:", e.message));
@@ -1742,10 +1747,10 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         
         const finalDuration = Date.now() - streamStartTime;
         const avgTimePerLine = linesInThisStream > 0 ? finalDuration / linesInThisStream : 0;
-        logInfo(`[STREAM-PROCESSOR] 📊 Stream attempt ${attempt + 1} summary:`);
+        logInfo(`[STREAM-PROCESSOR] Stream attempt ${attempt + 1} summary:`);
         logInfo(`  - Duration: ${finalDuration}ms`);
         logInfo(`  - Lines processed: ${linesInThisStream}`);
-        logInfo(`  - Characters sent to client: ${textInThisStream.length}`);
+        logInfo(`  - Characters sent in this stream: ${charsSentInThisStream}`);
         logInfo(`  - Average time per line: ${avgTimePerLine.toFixed(2)}ms`);
         logInfo(`  - Final interruption reason: ${interruptionReason || 'NONE'}`);
       }
