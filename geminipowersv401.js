@@ -1450,20 +1450,19 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               logWarn(`Error during state update from a valid payload (non-critical, continuing stream): ${e.message}`, payload);
           }
           
-          // 🔥 Key: Accumulate original text (including finish marker) for internal integrity checks, while separately recording text sent to client
-          if (textChunk && !isThought) {
-              accumulatedText += textChunk;  // Keep finish marker for checking
-              
-              // CRITICAL FIX: If this chunk contains the finish marker, we must not swallow it
-              // even in swallow mode, as it signals completion
-              if (swallowModeActive && hasFinishMarker) {
-                  logWarn("CRITICAL: Detected finish marker in swallow mode. Deactivating swallow mode to preserve completion signal.");
-                  swallowModeActive = false;
-              }
+          // REMOVED: The premature accumulation of text is removed from here.
+          // The state of 'accumulatedText' will now be updated authoritatively ONLY when lines are flushed from the buffer.
+          // This creates a single source of truth and fixes the state desynchronization bug.
+          
+          // Handle finish marker detection in swallow mode
+          if (textChunk && !isThought && swallowModeActive && hasFinishMarker) {
+              logWarn("CRITICAL: Detected finish marker in swallow mode. Deactivating swallow mode to preserve completion signal.");
+              swallowModeActive = false;
           }
 
           // Optimization point 4: Restructure `finishReason` extraction, making it no longer dependent on original line but directly obtained from parsed payload, more efficient and reliable
           const finishReason = payload?.candidates?.[0]?.finishReason;
+          
           if (finishReason) {
               finishReasonArrived = true;
               logInfo(`Finish reason received: ${finishReason}. Current state: ${strategist.streamState}`);
@@ -1537,12 +1536,12 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                       if (lineInfo.isData) {
                           const parseResult = parseLineContent(lineInfo.line.replace(/\n\n$/, ''));
                           if (parseResult) {
-                              // CRITICAL BUG FIX: Ensure accumulatedText includes all flushed content
-                              // This synchronization is essential for accurate retry context generation
-                              // Without this, retry requests may be based on incomplete text history
+                              // AUTHORITATIVE STATE UPDATE: This is the single source of truth for updating the session's accumulated text.
+                              // It's updated here because we are now committing this text to be sent to the client.
                               if (parseResult.text && !parseResult.isThought) {
                                   accumulatedText += parseResult.text;
                               }
+                              // This correctly updates the counter for text sent in the current stream.
                               if (parseResult.cleanedText) {
                                   textInThisStream += parseResult.cleanedText;
                               }
@@ -1555,7 +1554,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                       break; // This line cannot be safely forwarded yet
                   }
               }
-
+              
               if (linesToWrite.length > 0) {
                   await safeWrite(SSE_ENCODER.encode(linesToWrite.join('')));
                   logDebug(`Flushed ${linesToWrite.length} lines, ${forwardedTextLength} characters to client`);
