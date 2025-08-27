@@ -1432,24 +1432,6 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               continue;
           }
           
-          // NEW: Enhanced client compatibility fix inspired by Project B.
-          // If a data chunk contains ONLY thoughts and no formal text, Gemini might incorrectly add a "finishReason".
-          // Some clients (like Cherry Studio) will prematurely stop rendering upon seeing any finishReason.
-          // This logic removes the premature finishReason from thought-only chunks to ensure client compatibility.
-          const hasOnlyThoughts = isThought && (!textChunk || textChunk.length === 0);
-          if (hasOnlyThoughts && payload?.candidates?.[0]?.finishReason) {
-              logWarn(`[COMPATIBILITY-FIX] Removing premature finishReason '${payload.candidates[0].finishReason}' from a thought-only chunk to prevent client errors.`);
-              // Create a deep copy to avoid side effects
-              const cleanedPayload = structuredClone(payload);
-              delete cleanedPayload.candidates[0].finishReason;
-              const cleanedLine = `data: ${JSON.stringify(cleanedPayload)}`;
-              // Forward the cleaned line immediately and skip further processing for this line.
-              // We use the lookahead buffer to maintain stream order.
-              lookaheadLinesBuffer.push({ line: cleanedLine + "\n\n", textLength: 0, isData: true });
-              // Do not add to textBuffer as it's not formal content.
-              continue;
-          }
-          
           // Key modification: If contains finish marker, send cleaned version to client
 
           if (hasFinishMarker && cleanedText !== textChunk) {
