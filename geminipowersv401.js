@@ -920,25 +920,33 @@ recordInterruption(reason, accumulatedText) {
         }
     }
     
-    // Advanced Rule 2: 时序模式分析（借鉴的清晰逻辑）
+    // Advanced Rule 2 (ENHANCED): 顽固性截断与时序模式分析
     if (this.retryHistory.length >= 3) {
-        const lastThreePositions = this.retryHistory.slice(-3).map(a => a.textLen);
+        const lastThreeAttempts = this.retryHistory.slice(-3);
+        const lastThreePositions = lastThreeAttempts.map(a => a.textLen);
         const variance = Math.max(...lastThreePositions) - Math.min(...lastThreePositions);
         const dynamicVarianceThreshold = this.recoveryIntelligence.adaptiveThresholds.varianceThreshold;
+
+        // Enhanced Point 1: Add "strict stagnation" detection. If variance is extremely small (less than 10 characters), 
+        // it indicates the model is completely stuck at the same point, which is the strongest logical blocking signal.
+        if (variance < 10) {
+             logError(`Advanced Heuristic Triggered (Rule 2.1 - Strict Stagnation): Generation is completely stuck at character position ${Math.round(lastThreePositions[0])}. Variance: ${variance}. Escalating to content-issue recovery.`);
+             return true;
+        }
         
         if (variance < dynamicVarianceThreshold) {
             // 增强：添加时序行为分析
-            const timeIntervals = this.retryHistory.slice(-3).map((a, i, arr) => 
+            const timeIntervals = lastThreeAttempts.map((a, i, arr) => 
                 i > 0 ? a.timestampMs - arr[i-1].timestampMs : 0).slice(1);
             const isPatternedTiming = timeIntervals.every(interval => 
                 Math.abs(interval - timeIntervals[0]) < 1000);
             
             if (isPatternedTiming) {
-                logError(`Advanced Heuristic Triggered (Rule 2): Repeated truncation with patterned timing detected. Strong content issue signal.`);
+                logError(`Advanced Heuristic Triggered (Rule 2.2 - Patterned Timing): Repeated truncation with patterned timing detected. Strong content issue signal.`);
                 return true;
             }
             
-            logError(`Advanced Heuristic Triggered (Rule 2): Repeated truncation around character ${Math.round(lastThreePositions[0])}. Variance: ${variance}. Assuming content issue.`);
+            logError(`Advanced Heuristic Triggered (Rule 2.3 - Loose Stagnation): Repeated truncation around character ${Math.round(lastThreePositions[0])}. Variance: ${variance}. Assuming content issue.`);
             return true;
         }
     }
@@ -974,26 +982,19 @@ recordInterruption(reason, accumulatedText) {
         return true;
     }
     
-    // Advanced Rule 5: 内容重复循环检测（防止模型陷入重复输出死循环）
-    if (this.retryHistory.length >= 3) {
-        const lastThreeSnippets = this.retryHistory.slice(-3).map(a => a.endSnippet);
-        // 检查最后三个片段是否完全相同（确保片段有足够长度进行有意义的比较）
-        if (lastThreeSnippets[0] && lastThreeSnippets[0].length >= 10) {
-            const snippet1 = lastThreeSnippets[0];
-            const snippet2 = lastThreeSnippets[1];
-            const snippet3 = lastThreeSnippets[2];
-            
-            // If any two of the last three snippets are identical, detect potential repetitive loop
-            if (snippet1 === snippet2 || snippet1 === snippet3 || snippet2 === snippet3) {
-                logError(`Advanced Heuristic Triggered (Rule 5): Repetitive content loop detected. Snippet: "${snippet1}". Assuming content issue.`);
-                return true;
-            }
+    // Advanced Rule 5 (ENHANCED): 强化内容重复循环检测
+    if (this.retryHistory.length >= 2) { // 降低检测阈值到2次
+        const lastTwoSnippets = this.retryHistory.slice(-2).map(a => a.endSnippet);
+        // Enhanced Point 2: Changed from detecting any 2 identical snippets out of 3 attempts 
+        // to more sensitive detection of 2 consecutive identical snippets.
+        if (lastTwoSnippets[0] && lastTwoSnippets[0].length >= 15 && lastTwoSnippets[0] === lastTwoSnippets[1]) { // 增加最小片段长度要求
+            logError(`Advanced Heuristic Triggered (Rule 5 - Repetitive Loop): Detected identical content snippet generated in two consecutive attempts. Snippet: "${lastTwoSnippets[0]}". Assuming content loop issue.`);
+            return true;
         }
     }
 
     return false;
   }
-
 
 
   /** 计算下一次重试的延迟时间（指数退避+抖动） */
@@ -1274,16 +1275,20 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               logDebug(`[HEARTBEAT] 💓 Sending SSE heartbeat #${heartbeatCount} (uptime: ${uptime}s)`);
             
             // Use richer heartbeat information to help client diagnostics
-            const heartbeatData = {
-                type: 'heartbeat',
-                count: heartbeatCount,
-                uptime: uptime,
-                timestamp: new Date().toISOString(),
-                requestId: requestId
+            // MODIFIED: Adopt Project B's heartbeat payload structure for better client compatibility (e.g., Chatbox).
+            // This format with `role: "model"` and empty text is widely accepted by various clients.
+            const heartbeatPayload = {
+              candidates: [{
+                content: {
+                  parts: [{ text: "" }],
+                  role: "model"
+                },
+                index: 0
+              }]
             };
             
             // ✨ FIXED: Use thread-safe write instead of direct writer.write()
-            safeWrite(SSE_ENCODER.encode(`: heartbeat ${JSON.stringify(heartbeatData)}\n\n`))
+            safeWrite(SSE_ENCODER.encode(`data: ${JSON.stringify(heartbeatPayload)}\n\n`))
                 .then(() => {
                     logDebug(`[HEARTBEAT] ✅ Heartbeat #${heartbeatCount} sent successfully`);
                     // 🔥 Reset failure counter
@@ -1305,6 +1310,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
             });
         }
         
+                
         // 🔥 If continuous heartbeat failures, may indicate client disconnection
         if (heartbeatFailures >= 3) {
             logError(`[HEARTBEAT] 🚨 Multiple heartbeat failures detected (${heartbeatFailures}). Client may have disconnected.`);
@@ -1478,6 +1484,37 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               finishReasonArrived = true;
               logInfo(`Finish reason received: ${finishReason}. Current state: ${strategist.streamState}`);
               
+              // CRITICAL FIX: Force flush lookahead buffer before making completion decisions
+              // This ensures accumulatedText reflects the complete final state
+              if (lookaheadLinesBuffer.length > 0) {
+                  let preDecisionFlushChars = 0;
+                  let linesToFlushNow = [];
+                  
+                  for (const lineInfo of lookaheadLinesBuffer) {
+                      if (lineInfo && lineInfo.line) {
+                          linesToFlushNow.push(lineInfo.line);
+                          if (lineInfo.isData) {
+                              const parseResult = parseLineContent(lineInfo.line.replace(/\n\n$/, ''));
+                              if (parseResult && parseResult.text && !parseResult.isThought) {
+                                  accumulatedText += parseResult.text;
+                              }
+                              if (parseResult && parseResult.cleanedText) {
+                                  preDecisionFlushChars += parseResult.cleanedText.length;
+                              }
+                          }
+                      }
+                  }
+                  
+                  if (linesToFlushNow.length > 0) {
+                      await safeWrite(SSE_ENCODER.encode(linesToFlushNow.join('')));
+                      logDebug(`Pre-decision buffer flush: sent ${linesToFlushNow.length} lines, ${preDecisionFlushChars} chars to ensure complete state`);
+                  }
+                  
+                  // Clear the buffer as content has been flushed
+                  lookaheadLinesBuffer = [];
+                  lookaheadTextBuffer = "";
+              }
+              
               // Use a switch statement to handle different finish reasons.
               switch (finishReason) {
                   case "STOP":
@@ -1506,6 +1543,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                           }
                       }
                       break;
+
 
                   case "SAFETY":
                   case "RECITATION":
@@ -1833,8 +1871,10 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 
         if (NON_RETRYABLE_STATUSES.has(retryResponse.status)) {
           await writeSSEErrorFromUpstream(safeWrite, retryResponse);
-          await safeClose();
-          return;
+          // CRITICAL FIX: Break the loop instead of returning immediately.
+          // This allows the function to exit gracefully through the finally block,
+          // ensuring any buffered messages (like this error) are sent before closing.
+          break;
         }
         if (!retryResponse.ok || !retryResponse.body) {
           throw new Error(`Upstream error on retry: ${retryResponse.status}`);
@@ -1847,7 +1887,11 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       } catch (e) {
         logError(`[Request-ID: ${requestId}] === RETRY ATTEMPT ${strategist.consecutiveRetryCount} FAILED ===`);
         logError(`Exception during retry fetch:`, e.message);
+        // Also break the loop on fetch errors to ensure graceful shutdown.
+        break;
       }
+      
+      
     } // Loop ends here, next retry will start as a new for loop iteration
   } finally { // ✨ New: finally block ensures timer cleanup
       writerClosed = true; // Mark writer as closed to prevent further writes
