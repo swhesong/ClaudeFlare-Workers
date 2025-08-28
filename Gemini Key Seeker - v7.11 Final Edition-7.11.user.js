@@ -13,9 +13,15 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=o0o.moe
 // @grant        GM_addStyle
 // @grant        GM_download
-// @grant        GM_log
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
-// @run-at       document-start
+// @grant        GM_registerMenuCommand
+// @grant        GM_log
+// @connect      generativelanguage.googleapis.com
+// @run-at       document-idle
+// @noframes
 // @license      MIT
 // ==/UserScript==
 
@@ -104,8 +110,73 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
                     reject(new Error(`Element ${selector} not found within ${timeout}ms`));
                 }, timeout);
             });
+        },
+        waitForRealPage: () => {
+            return new Promise((resolve) => {
+                let attempts = 0;
+                const maxAttempts = 60; // Wait up to 60 seconds
+                
+                const checkInterval = setInterval(() => {
+                    attempts++;
+                    debug.log(`Waiting for real page, attempt ${attempts}/${maxAttempts}`);
+                    
+                    // Check if anti-bot protection is gone and real content is loaded
+                    const hasRealContent = (
+                        document.querySelector('.pagination') ||
+                        document.querySelector('table') ||
+                        document.querySelector('[href*="logout"]') ||
+                        (document.body && document.body.textContent.includes('Total Keys'))
+                    );
+                    
+                    const hasAntiBot = document.body && (
+                        document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
+                        document.body.textContent.includes('Checking your browser') ||
+                        document.body.textContent.includes('DDoS protection')
+                    );
+                    
+                    if (hasRealContent && !hasAntiBot) {
+                        debug.log('Real page content detected, proceeding with initialization');
+                        clearInterval(checkInterval);
+                        resolve(true);
+                    } else if (attempts >= maxAttempts) {
+                        debug.log('Timeout waiting for real page, proceeding anyway');
+                        clearInterval(checkInterval);
+                        resolve(false);
+                    }
+                }, 1000);
+            });
         }
     };
+
+    // Function to wait for real page load after anti-bot protection
+    async function waitForRealPageLoad() {
+        debug.log('Starting to wait for real page after anti-bot protection');
+        
+        try {
+            await debug.waitForRealPage();
+            debug.log('Real page loaded, starting normal initialization');
+            
+            // Enhanced domain validation
+            const currentDomain = window.location.hostname.toLowerCase();
+            const validDomains = ['geminikeyseeker.o0o.moe', 'www.geminikeyseeker.o0o.moe'];
+            const isDomainValid = validDomains.some(domain => currentDomain === domain || currentDomain.endsWith('.' + domain));
+            
+            if (!isDomainValid) {
+                debug.error('Script running on incorrect domain:', window.location.hostname);
+                debug.log('Valid domains are:', validDomains);
+                return;
+            } else {
+                debug.log('Domain validation passed:', currentDomain);
+            }
+
+            // Start initialization after anti-bot protection is cleared
+            tryInitialize();
+            
+        } catch (error) {
+            debug.error('Error waiting for real page:', error.message);
+        }
+    }
+
 
     // --- 辅助函数 ---
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -344,55 +415,69 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         return maxPage;
     }
 
-    function downloadKeys(keys, filename, alertMessage) {
+async function downloadKeys(keys, filename, alertMessage) {
+    try {
+        const uniqueKeys = [...new Set(keys)];
+        debug.log(`准备下载 ${uniqueKeys.length} 个唯一密钥到文件: ${filename}`);
+
+        if (uniqueKeys.length === 0) {
+            debug.log("下载被调用但密钥数量为0，跳过下载");
+            return;
+        }
+
+        const fileContent = uniqueKeys.join('\n');
+        const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
+
+        // 采用清晰、正确的下载逻辑
         try {
-            const uniqueKeys = [...new Set(keys)];
-            debug.log(`准备下载 ${uniqueKeys.length} 个唯一密钥到文件: ${filename}`);
-
-            if (uniqueKeys.length === 0) {
-                debug.log("下载被调用但密钥数量为0，跳过下载");
-                return;
+            if (typeof GM_download === 'function') {
+                GM_download({ 
+                    url: URL.createObjectURL(blob), 
+                    name: filename, 
+                    saveAs: true 
+                });
+                debug.log(`GM_download 启动成功: ${filename}`);
+            } else {
+                throw new Error('GM_download not available');
             }
-
-            const fileContent = uniqueKeys.join('\n');
-            const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
-
-            try {
-                if (typeof GM_download !== 'undefined') {
-                    GM_download({ 
-                        url: URL.createObjectURL(blob), 
-                        name: filename, 
-                        saveAs: true 
-                    });
-                    debug.log(`GM_download 启动成功: ${filename}`);
-                } else {
-                    throw new Error('GM_download not available');
-                }
-                
-                if (alertMessage) {
-                    safeAlert(alertMessage);
-                }
-            } catch (downloadError) {
-                debug.error(`GM_download 失败:`, downloadError.message);
-                // 备用下载方式
-                const link = document.createElement('a');
-                link.href = URL.createObjectURL(blob);
-                link.download = filename;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                debug.log('使用备用下载方式');
-                
-                if (alertMessage) {
-                    safeAlert(alertMessage + ' (使用备用方式下载)');
-                }
+            
+            if (alertMessage) {
+                safeAlert(alertMessage);
             }
-        } catch (error) {
-            debug.error('downloadKeys 关键错误:', error.message);
-            safeAlert(`下载过程发生错误：${error.message}`);
+        } catch (downloadError) {
+            debug.error(`GM_download 失败或不可用:`, downloadError.message);
+            // 统一的备用下载方案
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            debug.log('使用备用下载方式');
+            
+            if (alertMessage) {
+                safeAlert(alertMessage + ' (使用备用方式下载)');
+            }
+        }
+    } catch (error) {
+
+        debug.error('downloadKeys critical error:', error.message);
+                // Prevent button disappearing by not throwing unhandled errors
+        try {
+            safeAlert(`Download process error: ${error.message}`);
+        } catch (alertError) {
+            debug.error('Alert failed:', alertError.message);
+        }
+                // Reset button state properly
+
+        const btn = document.getElementById('key-seeker-btn');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Smart Key Grabber';
+            btn.style.backgroundColor = '#2196F3';
         }
     }
-
+}
     // --- 优化的并发处理 ---
     async function processPagesInBatch(pages, baseUrl) {
         const pageQueue = [...pages];
@@ -530,7 +615,15 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             await verifyAndExportKeys(uniqueKeys);
             
         } catch (error) {
-            debug.error('收集失败:', error.message);
+            debug.error('Collection failed:', error.message);
+            
+            // Enhanced error handling to prevent button disappearing
+            const btn = document.getElementById('key-seeker-btn');
+            if (btn) {
+                btn.disabled = false;
+                btn.style.backgroundColor = '#F44336';
+                btn.textContent = 'Collection Failed - Click to Retry';
+            }
             
             if (error.message === 'WAF_BLOCKED') {
                 safeAlert(`抓取过程中被防火墙拦截！\n建议：\n1. 等待几分钟后重试\n2. 降低并发数设置\n3. 增加延迟时间`);
@@ -645,42 +738,83 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         debug.log('Injecting button and styles...');
         
         try {
-            // 注入样式
-            const style = document.createElement('style');
-            style.textContent = `
-                #key-seeker-btn {
-                    position: fixed !important; 
-                    top: 15px !important; 
-                    right: 20px !important; 
-                    z-index: 999999 !important;
-                    padding: 12px 18px !important; 
-                    background-color: #2196F3 !important; 
-                    color: white !important;
-                    border: none !important; 
-                    border-radius: 8px !important; 
-                    cursor: pointer !important;
-                    font-size: 14px !important; 
-                    font-weight: bold !important;
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
-                    transition: all 0.3s ease !important;
-                    font-family: Arial, sans-serif !important;
+            // Inject styles with fallback support
+            try {
+                if (typeof GM_addStyle === 'function') {
+                    GM_addStyle(`
+                        #key-seeker-btn {
+                            position: fixed !important; 
+                            top: 15px !important; 
+                            right: 20px !important; 
+                            z-index: 2147483647 !important;
+                            padding: 12px 18px !important; 
+                            background-color: #2196F3 !important; 
+                            color: white !important;
+                            border: none !important; 
+                            border-radius: 8px !important; 
+                            cursor: pointer !important;
+                            font-size: 14px !important; 
+                            font-weight: bold !important;
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
+                            transition: all 0.3s ease !important;
+                            font-family: Arial, sans-serif !important;
+                        }
+                        #key-seeker-btn:hover { 
+                            background-color: #1976D2 !important; 
+                            transform: translateY(-2px) !important;
+                            box-shadow: 0 6px 12px rgba(0,0,0,0.4) !important;
+                        }
+                        #key-seeker-btn:active { 
+                            transform: scale(0.98) !important; 
+                        }
+                        #key-seeker-btn:disabled { 
+                            background-color: #9E9E9E !important; 
+                            cursor: not-allowed !important; 
+                            transform: none !important;
+                        }
+                    `);
+                    debug.log('GM_addStyle injection successful');
+                } else {
+                    throw new Error('GM_addStyle not available');
                 }
-                #key-seeker-btn:hover { 
-                    background-color: #1976D2 !important; 
-                    transform: translateY(-2px) !important;
-                    box-shadow: 0 6px 12px rgba(0,0,0,0.4) !important;
-                }
-                #key-seeker-btn:active { 
-                    transform: scale(0.98) !important; 
-                }
-                #key-seeker-btn:disabled { 
-                    background-color: #9E9E9E !important; 
-                    cursor: not-allowed !important; 
-                    transform: none !important;
-                }
-            `;
-            document.head.appendChild(style);
-            debug.log('样式注入成功');
+            } catch (e) {
+                debug.log('GM_addStyle failed, using fallback method');
+                const style = document.createElement('style');
+                style.textContent = `
+                    #key-seeker-btn {
+                        position: fixed !important; 
+                        top: 15px !important; 
+                        right: 20px !important; 
+                        z-index: 2147483647 !important;
+                        padding: 12px 18px !important; 
+                        background-color: #2196F3 !important; 
+                        color: white !important;
+                        border: none !important; 
+                        border-radius: 8px !important; 
+                        cursor: pointer !important;
+                        font-size: 14px !important; 
+                        font-weight: bold !important;
+                        box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
+                        transition: all 0.3s ease !important;
+                        font-family: Arial, sans-serif !important;
+                    }
+                    #key-seeker-btn:hover { 
+                        background-color: #1976D2 !important; 
+                        transform: translateY(-2px) !important;
+                        box-shadow: 0 6px 12px rgba(0,0,0,0.4) !important;
+                    }
+                    #key-seeker-btn:active { 
+                        transform: scale(0.98) !important; 
+                    }
+                    #key-seeker-btn:disabled { 
+                        background-color: #9E9E9E !important; 
+                        cursor: not-allowed !important; 
+                        transform: none !important;
+                    }
+                `;
+                document.head.appendChild(style);
+                debug.log('Fallback style injection successful');
+            }
 
             // Create button
             const button = document.createElement('button');
@@ -753,19 +887,36 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             });
             debug.log('事件监听器添加成功');
 
-            // 检查待办任务
+            // Check pending tasks with enhanced error handling
             try {
                 const pendingTask = sessionStorage.getItem(CONFIG.processStateKey);
                 if (pendingTask === 'true') {
-                    debug.log('页面加载时发现待办任务，开始收集...');
+                    debug.log('Found pending task on page load, starting collection...');
                     sessionStorage.removeItem(CONFIG.processStateKey);
-                    setTimeout(() => {
-                        debug.log('执行延迟任务');
-                        startBackgroundCollection();
+                    
+                    // Add button state management during auto-execution
+                    const btn = document.getElementById('key-seeker-btn');
+                    if (btn) {
+                        btn.textContent = 'Auto-executing pending task...';
+                        btn.disabled = true;
+                    }
+                    
+                    setTimeout(async () => {
+                        debug.log('Executing delayed task');
+                        try {
+                            await startBackgroundCollection();
+                        } catch (taskError) {
+                            debug.error('Pending task execution failed:', taskError.message);
+                            if (btn) {
+                                btn.disabled = false;
+                                btn.textContent = 'Task Failed - Click to Retry';
+                                btn.style.backgroundColor = '#F44336';
+                            }
+                        }
                     }, 1000);
                 }
             } catch (error) {
-                debug.error('检查待办任务时出错:', error.message);
+                debug.error('Error checking pending tasks:', error.message);
             }
 
             debug.log('初始化完成！');
@@ -779,6 +930,19 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
     // --- Final Solution: Multiple Initialization Strategies ---
     function tryInitialize() {
         debug.log('Attempting to initialize script...');
+        
+        // Enhanced check for anti-bot protection before initialization
+        const recheckAntiBot = document.body && (
+            document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
+            document.body.textContent.includes('Checking your browser') ||
+            document.querySelector('[class*="cf-"]')
+        );
+        
+        if (recheckAntiBot) {
+            debug.log('Anti-bot protection still active, delaying initialization');
+            setTimeout(() => tryInitialize(), 2000);
+            return;
+        }
         
         // Strategy 1: Immediate attempt
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -800,9 +964,20 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             setTimeout(() => initialize().catch(e => debug.error('Init failed:', e)), 500);
         });
         
-        // 策略4: 使用 MutationObserver 监视页面变化
+        // Strategy 4: Use MutationObserver to monitor page changes - Enhanced for anti-bot detection
         const observer = new MutationObserver((mutations, obs) => {
-            // 检查是否有关键元素出现
+            // First check if anti-bot protection is cleared
+            const hasAntiBot = document.body && (
+                document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
+                document.body.textContent.includes('Checking your browser')
+            );
+            
+            if (hasAntiBot) {
+                debug.log('MutationObserver: Anti-bot protection still active');
+                return;
+            }
+            
+            // Check for key elements appearance
             const indicators = [
                 'a[href*="logout"]',
                 '.pagination',
@@ -814,7 +989,7 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             
             for (const selector of indicators) {
                 if (document.querySelector(selector) && !document.getElementById('key-seeker-btn')) {
-                    debug.log(`检测到关键元素 ${selector}，页面就绪，开始初始化`);
+                    debug.log(`Detected key element ${selector}, page ready, starting initialization`);
                     initialize();
                     obs.disconnect();
                     return;
@@ -871,11 +1046,44 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         debug.log('Document readyState:', document.readyState);
         debug.log('User Agent:', navigator.userAgent);
         debug.log('Tampermonkey version:', typeof GM_info !== 'undefined' ? GM_info.version : 'Unknown');
-        debug.log('Available GM functions:', {
+        const gmFunctions = {
             'GM_addStyle': typeof GM_addStyle !== 'undefined',
             'GM_download': typeof GM_download !== 'undefined',
-            'GM_log': typeof GM_log !== 'undefined'
-        });
+            'GM_log': typeof GM_log !== 'undefined',
+            'GM_xmlhttpRequest': typeof GM_xmlhttpRequest !== 'undefined'
+        };
+
+        debug.log('Available GM functions:', gmFunctions);
+
+        // Check if essential functions are missing
+        const missingFunctions = Object.keys(gmFunctions).filter(key => !gmFunctions[key]);
+        if (missingFunctions.length > 0) {
+            debug.error('Missing essential Tampermonkey functions:', missingFunctions);
+            
+            // Show permission warning to user
+            setTimeout(() => {
+                const permissionWarning = `WARNING: Missing Tampermonkey Permissions\n\nThe following functions are not available:\n${missingFunctions.map(f => '• ' + f).join('\n')}\n\nThis may cause limited functionality. Please:\n1. Check Tampermonkey settings\n2. Ensure script has proper grants\n3. Reload the page after fixing permissions\n\nScript will attempt to use fallback methods.`;
+                
+                safeAlert(permissionWarning);
+            }, 2000);
+        }
+        
+        // Check for anti-bot protection before proceeding
+        const hasAntiBot = document.body && (
+            document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
+            document.body.textContent.includes('Checking your browser') ||
+            document.body.textContent.includes('DDoS protection') ||
+            document.querySelector('[class*="cf-"]') ||
+            document.querySelector('[id*="cf-"]') ||
+            window.location.pathname.includes('/cdn-cgi/')
+        );
+        
+        if (hasAntiBot) {
+            debug.log('Anti-bot protection detected, waiting for real page to load...');
+            waitForRealPageLoad();
+            return;
+        }
+        
         debug.domInfo();
 
         // Enhanced domain validation
