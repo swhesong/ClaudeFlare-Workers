@@ -1238,7 +1238,8 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       isWriting = false;
     }
   };
-  // ✨ NEW: Graceful shutdown function for the writer
+
+  // Graceful shutdown function for the writer
   const safeClose = async () => {
     if (writerClosed) return;
     
@@ -1252,14 +1253,19 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         await processWriteQueue(); // Process one last time
     }
     
+    // CRITICAL FIX: Set writerClosed flag BEFORE attempting to close
+    // This prevents race conditions in concurrent scenarios
     writerClosed = true;
     try {
       await writer.close();
       logDebug("[SAFE-CLOSE] Writer closed successfully.");
     } catch (e) {
       logError("[SAFE-CLOSE] Error closing writer:", e.message);
+      // Even if close() fails, keep writerClosed = true to prevent retry loops
     }
   };
+  
+  
   const cleanup = (reader) => { if (reader) { logDebug("Cleaning up reader"); reader.cancel().catch(() => {}); } };
 
   try { // ✨ New: try block wraps entire function logic
@@ -1720,13 +1726,11 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                         const parseResult = parseLineContent(lineInfo.line.replace(/\n\n$/, ''));
                         // Check if line content was successfully parsed.
                         if (parseResult) {
-                            // 🔥 CRITICAL STATE SYNC FIX: Update session-level `accumulatedText` with the original text 
-                            // (including potential finish markers) from final flush content.
-                            // This is the core fix that ensures next retry context is based on ALL generated 
-                            // and sent content, resolving the state desynchronization bug.
-                            // We only accumulate non-"thought" text, consistent with main loop logic.
-                            if (parseResult.text && !parseResult.isThought) {
-                                accumulatedText += parseResult.text;
+                            // ENHANCED STATE SYNC FIX: Use cleaned text (without finish markers) for accumulation
+                            // This prevents finish tokens from polluting the retry context and causing
+                            // generation anomalies in subsequent attempts
+                            if (parseResult.cleanedText && !parseResult.isThought) {
+                                accumulatedText += parseResult.cleanedText;
                             }
                             // Keep existing logic for tracking characters sent to client.
                             if (parseResult.cleanedText) {
@@ -1895,6 +1899,12 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
         logInfo(`[Request-ID: ${requestId}] ✓ Retry attempt ${strategist.consecutiveRetryCount} successful - got new stream`);
         strategist.resetDelay();
         currentReader = retryResponse.body.getReader();
+        
+        // CRITICAL FIX: Reset accumulated text to prevent state synchronization issues
+        // This ensures each retry starts with a clean context and prevents false
+        // content issue detection from stale text fragments
+        accumulatedText = "";
+        logDebug(`[Request-ID: ${requestId}] Accumulated text reset for fresh retry context`);
 
       } catch (e) {
         logError(`[Request-ID: ${requestId}] === RETRY ATTEMPT ${strategist.consecutiveRetryCount} FAILED ===`);
@@ -1905,8 +1915,9 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       
       
     } // Loop ends here, next retry will start as a new for loop iteration
-  } finally { // ✨ New: finally block ensures timer cleanup
-      writerClosed = true; // Mark writer as closed to prevent further writes
+  } finally { // Finally block ensures timer cleanup only
+      // CRITICAL FIX: Do NOT set writerClosed = true here
+      // This flag should only be set when writer is actually closed
       if (heartbeatInterval) {
           logInfo(`[Request-ID: ${requestId}] Clearing SSE heartbeat interval.`);
           clearInterval(heartbeatInterval);
@@ -1915,6 +1926,18 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
       // Ensure cleanup of any remaining resources
       if (currentReader) {
           cleanup(currentReader);
+      }
+  }
+  
+  // CRITICAL FIX: Ensure stream is always closed regardless of how function exits
+  // This prevents Worker hanging when retry loops exit via break statements
+  // or other non-return paths that bypass the safeClose() calls in the main logic
+  if (!writerClosed) {
+      logWarn(`[Request-ID: ${requestId}] Function exiting without proper stream closure, performing emergency close`);
+      try {
+          await safeClose();
+      } catch (closeError) {
+          logError(`[Request-ID: ${requestId}] Error during emergency close: ${closeError.message}`);
       }
   }
 }
