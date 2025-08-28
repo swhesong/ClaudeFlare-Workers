@@ -3,15 +3,19 @@
 // @name:en      Gemini Key Seeker - v7.2 Debug Edition
 // @namespace    http://tampermonkey.net/
 // @version      7.2-debug-fix
-// @description  【调试修复版】增强调试功能，修复初始化问题，提升稳定性
+// @description  [Debug Fix Edition] Enhanced debugging, fixed initialization issues, improved stability
 // @description:en [Debug Fix Edition] Enhanced debugging, fixed initialization issues, improved stability
 // @author       You & AI
 // @match        https://geminikeyseeker.o0o.moe/*
 // @match        https://*.geminikeyseeker.o0o.moe/*
+// @match        *://geminikeyseeker.o0o.moe/*
+// @match        *://*.geminikeyseeker.o0o.moe/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=o0o.moe
 // @grant        GM_addStyle
 // @grant        GM_download
 // @grant        GM_log
+// @grant        unsafeWindow
+// @run-at       document-start
 // @license      MIT
 // ==/UserScript==
 
@@ -24,7 +28,8 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
     const DEBUG = {
         enabled: true,
         verbose: true,
-        showDOMInfo: true
+        showDOMInfo: true,
+        forceInit: true
     };
 
     // --- 配置项 ---
@@ -38,7 +43,7 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         cacheEnabled: true
     };
 
-    // --- 增强调试函数 ---
+    // --- Enhanced Debug Functions ---
     const debug = {
         log: (message, data = null) => {
             if (DEBUG.enabled) {
@@ -48,7 +53,7 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
                     try {
                         GM_log(`[KeySeeker] ${message}`);
                     } catch (e) {
-                        // GM_log 可能不可用，忽略错误
+                        // GM_log may not be available, ignore error
                     }
                 }
             }
@@ -58,17 +63,47 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         },
         domInfo: () => {
             if (DEBUG.showDOMInfo) {
-                debug.log('DOM 信息检查:', {
+                debug.log('DOM Information Check:', {
                     'document.readyState': document.readyState,
                     'document.body': !!document.body,
+                    'document.documentElement': !!document.documentElement,
                     'URL': window.location.href,
                     'Title': document.title,
                     'Has logout link': !!document.querySelector('a[href*="logout"]'),
                     'Has table': !!document.querySelector('table'),
                     'Has pagination': !!document.querySelector('.pagination'),
-                    'Button exists': !!document.getElementById('key-seeker-btn')
+                    'Button exists': !!document.getElementById('key-seeker-btn'),
+                    'Body children count': document.body ? document.body.children.length : 0,
+                    'Viewport size': `${window.innerWidth}x${window.innerHeight}`
                 });
             }
+        },
+        waitForElement: async (selector, timeout = 10000) => {
+            return new Promise((resolve, reject) => {
+                const element = document.querySelector(selector);
+                if (element) {
+                    resolve(element);
+                    return;
+                }
+
+                const observer = new MutationObserver(() => {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        observer.disconnect();
+                        resolve(element);
+                    }
+                });
+
+                observer.observe(document.documentElement, {
+                    childList: true,
+                    subtree: true
+                });
+
+                setTimeout(() => {
+                    observer.disconnect();
+                    reject(new Error(`Element ${selector} not found within ${timeout}ms`));
+                }, timeout);
+            });
         }
     };
 
@@ -570,23 +605,45 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         }
     }
 
-    // --- 增强的初始化函数 ---
-    function initialize() {
-        debug.log('开始初始化...');
+    // --- Enhanced Initialization Function ---
+    async function initialize() {
+        debug.log('Starting initialization...');
+        debug.log('Current URL:', window.location.href);
+        debug.log('Document readyState:', document.readyState);
         debug.domInfo();
 
-        if (document.getElementById('key-seeker-btn')) {
-            debug.log('按钮已存在，跳过初始化');
-            return;
+        // Enhanced button existence check
+        const existingButton = document.getElementById('key-seeker-btn');
+        if (existingButton) {
+            debug.log('Button already exists, removing old instance and recreating');
+            try {
+                existingButton.remove();
+            } catch (e) {
+                debug.error('Error removing existing button:', e.message);
+            }
         }
 
+        // Wait for body to be available - Enhanced waiting logic
         if (!document.body) {
-            debug.log('document.body 不存在，将重试');
-            return;
+            debug.log('document.body does not exist, waiting...');
+            try {
+                await debug.waitForElement('body', 10000);
+                debug.log('document.body is now available');
+            } catch (error) {
+                debug.error('Failed to wait for body:', error.message);
+                // Try to create body if it doesn't exist
+                if (!document.body && document.documentElement) {
+                    const body = document.createElement('body');
+                    document.documentElement.appendChild(body);
+                    debug.log('Created body element manually');
+                } else {
+                    return;
+                }
+            }
         }
 
-        debug.log('注入按钮和样式...');
-
+        debug.log('Injecting button and styles...');
+        
         try {
             // 注入样式
             const style = document.createElement('style');
@@ -625,14 +682,68 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             document.head.appendChild(style);
             debug.log('样式注入成功');
 
-            // 创建按钮
+            // Create button
             const button = document.createElement('button');
             button.id = 'key-seeker-btn';
-            button.textContent = '🚀 一键智能抓取';
-            button.title = 'Gemini Key Seeker v7.2 - 点击开始抓取和验证API密钥';
+            button.textContent = '🚀 Smart Key Grabber';
+            button.title = 'Gemini Key Seeker v7.2 - Click to start grabbing and verifying API keys';
+            
+            // Ensure button is visible and accessible - Enhanced styling
+            button.style.cssText = `
+                position: fixed !important;
+                top: 15px !important;
+                right: 20px !important;
+                z-index: 2147483647 !important;
+                padding: 12px 18px !important;
+                background-color: #2196F3 !important;
+                color: white !important;
+                border: none !important;
+                border-radius: 8px !important;
+                cursor: pointer !important;
+                font-size: 14px !important;
+                font-weight: bold !important;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.3) !important;
+                transition: all 0.3s ease !important;
+                font-family: Arial, sans-serif !important;
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                transform: none !important;
+                margin: 0 !important;
+                width: auto !important;
+                height: auto !important;
+                min-width: auto !important;
+                min-height: auto !important;
+                max-width: none !important;
+                max-height: none !important;
+            `;
+            
             document.body.appendChild(button);
-            debug.log('按钮创建成功');
-
+            debug.log('Button created successfully');
+            
+            // Verify button is actually in DOM and visible - Enhanced verification
+            setTimeout(() => {
+                const verifyButton = document.getElementById('key-seeker-btn');
+                if (verifyButton) {
+                    debug.log('Button verification successful');
+                    const rect = verifyButton.getBoundingClientRect();
+                    const computedStyle = window.getComputedStyle(verifyButton);
+                    debug.log('Button position and visibility:', {
+                        'getBoundingClientRect': rect,
+                        'display': computedStyle.display,
+                        'visibility': computedStyle.visibility,
+                        'opacity': computedStyle.opacity,
+                        'z-index': computedStyle.zIndex,
+                        'position': computedStyle.position
+                    });
+                } else {
+                    debug.error('Button verification failed - not found in DOM');
+                    debug.log('DOM body children:', document.body ? document.body.children.length : 'No body');
+                    debug.log('Document ready state:', document.readyState);
+                }
+            }, 100);
+            
             // 添加事件监听器
             button.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -665,28 +776,28 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         }
     }
 
-    // --- 最终解决方案：多重初始化策略 ---
+    // --- Final Solution: Multiple Initialization Strategies ---
     function tryInitialize() {
-        debug.log('尝试初始化脚本...');
+        debug.log('Attempting to initialize script...');
         
-        // 策略1: 立即尝试
+        // Strategy 1: Immediate attempt
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
-            debug.log('文档已就绪，立即初始化');
-            setTimeout(initialize, 100);
+            debug.log('Document is ready, initializing immediately');
+            setTimeout(() => initialize().catch(e => debug.error('Init failed:', e)), 100);
         }
         
-        // 策略2: DOM内容加载完成后
+        // Strategy 2: After DOM content loaded
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
-                debug.log('DOMContentLoaded 触发，初始化');
-                setTimeout(initialize, 100);
+                debug.log('DOMContentLoaded triggered, initializing');
+                setTimeout(() => initialize().catch(e => debug.error('Init failed:', e)), 100);
             });
         }
         
-        // 策略3: 窗口完全加载后
+        // Strategy 3: After window fully loaded
         window.addEventListener('load', () => {
-            debug.log('窗口加载完成，延迟初始化');
-            setTimeout(initialize, 500);
+            debug.log('Window load complete, delayed initialization');
+            setTimeout(() => initialize().catch(e => debug.error('Init failed:', e)), 500);
         });
         
         // 策略4: 使用 MutationObserver 监视页面变化
@@ -754,21 +865,67 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         }, 1000);
     }
 
-    // --- 脚本启动入口 ---
-    debug.log('脚本开始执行，URL:', window.location.href);
-    debug.log('Document readyState:', document.readyState);
-    debug.domInfo();
+    // --- Script Startup Entry Point - Enhanced error handling ---
+    try {
+        debug.log('Script execution started, URL:', window.location.href);
+        debug.log('Document readyState:', document.readyState);
+        debug.log('User Agent:', navigator.userAgent);
+        debug.log('Tampermonkey version:', typeof GM_info !== 'undefined' ? GM_info.version : 'Unknown');
+        debug.log('Available GM functions:', {
+            'GM_addStyle': typeof GM_addStyle !== 'undefined',
+            'GM_download': typeof GM_download !== 'undefined',
+            'GM_log': typeof GM_log !== 'undefined'
+        });
+        debug.domInfo();
 
-    // 立即开始初始化尝试
-    tryInitialize();
+        // Enhanced domain validation
+        const currentDomain = window.location.hostname.toLowerCase();
+        const validDomains = ['geminikeyseeker.o0o.moe', 'www.geminikeyseeker.o0o.moe'];
+        const isDomainValid = validDomains.some(domain => currentDomain === domain || currentDomain.endsWith('.' + domain));
+        
+        if (!isDomainValid) {
+            debug.error('Script running on incorrect domain:', window.location.hostname);
+            debug.log('Valid domains are:', validDomains);
+            return;
+        } else {
+            debug.log('Domain validation passed:', currentDomain);
+        }
 
-    // 额外的安全措施：如果5秒后仍然没有按钮，强制初始化
+        // Immediately start initialization attempts
+        tryInitialize();
+    } catch (startupError) {
+        console.error('%c[KeySeeker STARTUP ERROR]', 'color: #ff0000; font-weight: bold;', startupError);
+        debug.error('Critical startup error:', startupError.message);
+    }
+
+    // Additional safety measure: if no button after 5 seconds, force initialization
     setTimeout(() => {
         if (!document.getElementById('key-seeker-btn')) {
-            debug.log('5秒后仍未找到按钮，执行强制初始化');
-            initialize();
+            debug.log('5 seconds passed without button, executing forced initialization');
+            initialize().catch(e => debug.error('Forced init failed:', e));
         }
     }, 5000);
+
+    // Ultimate fallback: keep trying every 3 seconds for 30 seconds
+    let attemptCount = 0;
+    const maxAttempts = 10;
+    const fallbackInterval = setInterval(() => {
+        attemptCount++;
+        if (document.getElementById('key-seeker-btn')) {
+            debug.log('Button found, stopping fallback attempts');
+            clearInterval(fallbackInterval);
+            return;
+        }
+        
+        if (attemptCount >= maxAttempts) {
+            debug.error('Maximum fallback attempts reached, stopping');
+            clearInterval(fallbackInterval);
+            return;
+        }
+        
+        debug.log(`Fallback attempt ${attemptCount}/${maxAttempts}`);
+        initialize().catch(e => debug.error('Fallback init failed:', e));
+    }, 3000);
 
     // 导出调试函数到全局作用域（仅在调试模式下）
     if (DEBUG.enabled) {
