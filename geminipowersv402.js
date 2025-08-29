@@ -1634,7 +1634,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
                           if (parseResult) {
                               // AUTHORITATIVE STATE UPDATE: This is the single source of truth for updating the session's accumulated text.
                               // It's updated here because we are now committing this text to be sent to the client.
-                              if (parseResult.cleanedText && !parseResult.isThought) {
+                              if (parseResult.cleanedText) {
                                   accumulatedText += parseResult.cleanedText;
                               }
                               // Update local counter for current flush operation only
