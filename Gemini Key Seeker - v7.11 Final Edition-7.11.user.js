@@ -30,7 +30,7 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
 (function() {
     'use strict';
 
-    // --- 调试配置 ---
+    // Debug configuration
     const DEBUG = {
         enabled: true,
         verbose: true,
@@ -38,13 +38,13 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         forceInit: true
     };
 
-    // --- 配置项 ---
+    // Main configuration
     const CONFIG = {
         pageDelay: 1000,
         processStateKey: 'keySeeker_pendingTask',
         requestTimeout: 10000,
         retryAttempts: 3,
-        concurrentRequests: 2, // 降低并发数以提高稳定性
+        concurrentRequests: 2, // Limit concurrent requests for stability
         adaptiveDelay: true,
         cacheEnabled: true
     };
@@ -114,34 +114,57 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         waitForRealPage: () => {
             return new Promise((resolve) => {
                 let attempts = 0;
-                const maxAttempts = 60; // Wait up to 60 seconds
+                const maxAttempts = 90; // Extended wait time to 90 seconds
                 
                 const checkInterval = setInterval(() => {
                     attempts++;
                     debug.log(`Waiting for real page, attempt ${attempts}/${maxAttempts}`);
                     
-                    // Check if anti-bot protection is gone and real content is loaded
+                    // Enhanced real content detection
                     const hasRealContent = (
                         document.querySelector('.pagination') ||
                         document.querySelector('table') ||
                         document.querySelector('[href*="logout"]') ||
-                        (document.body && document.body.textContent.includes('Total Keys'))
+                        document.querySelector('a[href*="logout"]') ||
+                        document.querySelector('.container') ||
+                        document.querySelector('#app') ||
+                        document.querySelector('main') ||
+                        (document.body && document.body.textContent.includes('Total Keys')) ||
+                        (document.body && document.body.textContent.includes('Valid (200)'))
                     );
                     
+                    // Enhanced anti-bot protection detection
                     const hasAntiBot = document.body && (
                         document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
                         document.body.textContent.includes('Checking your browser') ||
-                        document.body.textContent.includes('DDoS protection')
+                        document.body.textContent.includes('DDoS protection') ||
+                        document.body.textContent.includes('Just a moment') ||
+                        document.body.textContent.includes('Verifying you are human') ||
+                        document.querySelector('[class*="cf-"]') ||
+                        document.querySelector('[id*="cf-"]') ||
+                        document.querySelector('.cf-browser-verification') ||
+                        window.location.pathname.includes('/cdn-cgi/') ||
+                        document.title.includes('Just a moment') ||
+                        document.querySelector('script[src*="cloudflare"]')
                     );
                     
-                    if (hasRealContent && !hasAntiBot) {
-                        debug.log('Real page content detected, proceeding with initialization');
+                    // Additional check for page stability
+                    const isPageStable = document.readyState === 'complete' && 
+                                       document.body && 
+                                       document.body.children.length > 5;
+                    
+                    if (hasRealContent && !hasAntiBot && isPageStable) {
+                        debug.log('Real page content detected with stability, proceeding with initialization');
                         clearInterval(checkInterval);
                         resolve(true);
                     } else if (attempts >= maxAttempts) {
                         debug.log('Timeout waiting for real page, proceeding anyway');
                         clearInterval(checkInterval);
                         resolve(false);
+                    }
+                    
+                    if (hasAntiBot) {
+                        debug.log('Anti-bot protection still active, continuing to wait...');
                     }
                 }, 1000);
             });
@@ -153,8 +176,16 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         debug.log('Starting to wait for real page after anti-bot protection');
         
         try {
-            await debug.waitForRealPage();
-            debug.log('Real page loaded, starting normal initialization');
+            const realPageLoaded = await debug.waitForRealPage();
+            
+            if (realPageLoaded) {
+                debug.log('Real page successfully loaded, starting normal initialization');
+            } else {
+                debug.log('Timeout waiting for real page, but proceeding with initialization');
+            }
+            
+            // Additional waiting period to ensure page stability
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
             // Enhanced domain validation
             const currentDomain = window.location.hostname.toLowerCase();
@@ -169,14 +200,28 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
                 debug.log('Domain validation passed:', currentDomain);
             }
 
+            // Final check before initialization
+            const finalAntiBotCheck = document.body && (
+                document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
+                document.body.textContent.includes('Checking your browser') ||
+                document.querySelector('[class*="cf-"]')
+            );
+            
+            if (finalAntiBotCheck) {
+                debug.log('Final anti-bot check failed, retrying in 3 seconds...');
+                setTimeout(() => waitForRealPageLoad(), 3000);
+                return;
+            }
+
             // Start initialization after anti-bot protection is cleared
             tryInitialize();
             
         } catch (error) {
             debug.error('Error waiting for real page:', error.message);
+            // Fallback: try initialization anyway after delay
+            setTimeout(() => tryInitialize(), 5000);
         }
     }
-
 
     // --- 辅助函数 ---
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -187,21 +232,13 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
 
     function safeAlert(message) {
         try {
-            alert(safeString(message));
+            alert(String(message).replace(/[\u0000-\u001F\u007F-\u009F]/g, ""));
         } catch (e) {
-            debug.error('Alert 错误:', e.message);
+            debug.error('Alert error:', e.message);
         }
     }
 
-    function safeString(str) {
-        try {
-            return String(str).replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-        } catch (e) {
-            return "Safe String Error";
-        }
-    }
-
-    // --- 密钥验证配置和函数 ---
+    // Key verification configuration and functions
     const VERIFICATION_CONFIG = {
         endpoints: [
             'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent',
@@ -284,11 +321,11 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
     async function verifyAndExportKeys(keys) {
         const uniqueKeys = [...new Set(keys)];
         if (uniqueKeys.length === 0) {
-            safeAlert("未抓取到任何Key，无法开始验证。");
+            safeAlert("No keys found, unable to start verification.");
             return;
         }
 
-        debug.log(`开始验证 ${uniqueKeys.length} 个唯一密钥`);
+        debug.log(`Starting verification of ${uniqueKeys.length} unique keys`);
         const keyQueue = [...uniqueKeys];
         const validKeys = [];
         const btn = document.getElementById('key-seeker-btn');
@@ -305,11 +342,11 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
                         validKeys.push(result.key);
                     }
                 } catch (e) {
-                    debug.error(`验证密钥时发生错误 ${key.substring(0,12)}:`, e.message);
+                    debug.error(`Error verifying key ${key.substring(0,12)}:`, e.message);
                 } finally {
                     completedCount++;
                     if (btn) {
-                        btn.textContent = `验证中... ${completedCount}/${uniqueKeys.length}`;
+                        btn.textContent = `Verifying... ${completedCount}/${uniqueKeys.length}`;
                     }
                 }
             }
@@ -318,47 +355,48 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
         const workers = Array.from({ length: VERIFICATION_CONFIG.concurrentRequests }, () => worker());
         await Promise.all(workers);
 
-        debug.log(`验证完成. 找到 ${validKeys.length} 个有效密钥`);
+        debug.log(`Verification complete. Found ${validKeys.length} valid keys`);
         
         if (btn) {
-            btn.textContent = `验证完成! ${validKeys.length}个有效Key`;
+            btn.textContent = `Verification Complete! ${validKeys.length} Valid Keys`;
         }
 
         if (validKeys.length > 0) {
             const filename = `keys_validated_${new Date().toISOString().slice(0, 10)}.txt`;
-            const alertMessage = `验证完成！共找到 ${validKeys.length} 个有效的Key。已开始下载【已验证】的Key文件。`;
+            const alertMessage = `Verification complete! Found ${validKeys.length} valid keys. Starting download of validated keys file.`;
             downloadKeys(validKeys, filename, alertMessage);
         } else {
-            safeAlert("验证完成，但未找到任何状态为200的有效Key。");
+            safeAlert("Verification complete, but no valid keys with status 200 were found.");
         }
 
         setTimeout(() => {
             try {
                 if (btn) {
                     btn.disabled = false;
-                    btn.textContent = '一键智能抓取';
+                    btn.textContent = 'Smart Key Grabber';
                     btn.style.backgroundColor = '#2196F3';
                 }
             } catch (e) {
-                debug.error(`重置按钮状态时出错:`, e.message);
+                debug.error(`Error resetting button state:`, e.message);
             }
         }, 3000);
     }
-
-    // --- 核心函数 ---
+    
+    
+    // Core functions
     function extractKeysFromHTML(htmlText) {
-        debug.log('开始从HTML中提取密钥');
+        debug.log('Starting key extraction from HTML');
         const keys = new Set();
         
-        // 更多样化的正则模式来匹配不同的HTML结构
+        // Multiple regex patterns to match different HTML structures
         const patterns = [
-            // 匹配表格单元格中的密钥
+            // Match keys in table cells
             /<td[^>]*>([^<]*AIzaSy[A-Za-z0-9_-]{33}[^<]*)<\/td>/gi,
-            // 匹配任何包含密钥的HTML元素
+            // Match keys in any HTML element
             />(AIzaSy[A-Za-z0-9_-]{33})</gi,
-            // 直接匹配密钥模式
+            // Direct key pattern matching
             /AIzaSy[A-Za-z0-9_-]{33}/g,
-            // 匹配可能在代码块中的密钥
+            // Match keys that might be in code blocks
             /<code[^>]*>([^<]*AIzaSy[A-Za-z0-9_-]{33}[^<]*)<\/code>/gi
         ];
 
@@ -369,12 +407,12 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
                 const keyMatch = keyText.match(/AIzaSy[A-Za-z0-9_-]{33}/);
                 if (keyMatch) {
                     keys.add(keyMatch[0]);
-                    debug.log(`Pattern ${index + 1} 找到密钥: ${keyMatch[0].substring(0, 12)}...`);
+                    debug.log(`Pattern ${index + 1} found key: ${keyMatch[0].substring(0, 12)}...`);
                 }
             }
         });
 
-        debug.log(`总共提取到 ${keys.size} 个唯一密钥`);
+        debug.log(`Total extracted ${keys.size} unique keys`);
         return Array.from(keys);
     }
 
@@ -411,54 +449,54 @@ console.log('%c GEMINI KEY SEEKER v7.2 DEBUG - SCRIPT LOADED! ', 'background: #2
             });
         });
 
-        debug.log(`检测到最大页码: ${maxPage}`);
+        debug.log(`Detected maximum page number: ${maxPage}`);
         return maxPage;
     }
 
 async function downloadKeys(keys, filename, alertMessage) {
     try {
         const uniqueKeys = [...new Set(keys)];
-        debug.log(`准备下载 ${uniqueKeys.length} 个唯一密钥到文件: ${filename}`);
+        debug.log(`Preparing to download ${uniqueKeys.length} unique keys to file: ${filename}`);
 
         if (uniqueKeys.length === 0) {
-            debug.log("下载被调用但密钥数量为0，跳过下载");
+            debug.log("Download called but key count is 0, skipping download");
             return;
         }
 
-        const fileContent = uniqueKeys.join('\n');
-        const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
+        // Create blob with proper content
+        const content = uniqueKeys.join('\n');
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const blobUrl = URL.createObjectURL(blob);
 
-        // 采用清晰、正确的下载逻辑
+        // Enhanced download logic with proper error handling
         try {
             if (typeof GM_download === 'function') {
-                GM_download({ 
-                    url: URL.createObjectURL(blob), 
-                    name: filename, 
-                    saveAs: true 
-                });
-                debug.log(`GM_download 启动成功: ${filename}`);
+                GM_download(blobUrl, filename);
+                debug.log(`GM_download started successfully: ${filename}`);
             } else {
                 throw new Error('GM_download not available');
             }
-            
-            if (alertMessage) {
-                safeAlert(alertMessage);
+                
+                if (alertMessage) {
+                    safeAlert(alertMessage);
+                }
+            } catch (downloadError) {
+                debug.error(`GM_download failed or unavailable:`, downloadError.message);
+                // Unified fallback download method
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                debug.log('Using fallback download method');
+                
+                if (alertMessage) {
+                    safeAlert(alertMessage + ' (using fallback method)');
+                }
             }
-        } catch (downloadError) {
-            debug.error(`GM_download 失败或不可用:`, downloadError.message);
-            // 统一的备用下载方案
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            debug.log('使用备用下载方式');
-            
-            if (alertMessage) {
-                safeAlert(alertMessage + ' (使用备用方式下载)');
-            }
-        }
+        
+        
     } catch (error) {
 
         debug.error('downloadKeys critical error:', error.message);
@@ -966,14 +1004,29 @@ async function downloadKeys(keys, filename, alertMessage) {
         
         // Strategy 4: Use MutationObserver to monitor page changes - Enhanced for anti-bot detection
         const observer = new MutationObserver((mutations, obs) => {
-            // First check if anti-bot protection is cleared
+            // Enhanced anti-bot protection check
             const hasAntiBot = document.body && (
                 document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
-                document.body.textContent.includes('Checking your browser')
+                document.body.textContent.includes('Checking your browser') ||
+                document.body.textContent.includes('DDoS protection') ||
+                document.body.textContent.includes('Just a moment') ||
+                document.body.textContent.includes('Verifying you are human') ||
+                document.querySelector('[class*="cf-"]') ||
+                document.querySelector('[id*="cf-"]') ||
+                document.title.includes('Just a moment')
             );
             
             if (hasAntiBot) {
-                debug.log('MutationObserver: Anti-bot protection still active');
+                debug.log('MutationObserver: Anti-bot protection still active, waiting...');
+                return;
+            }
+            
+            // Additional stability check
+            const isPageStable = document.readyState === 'complete' && 
+                               document.body.children.length > 3;
+            
+            if (!isPageStable) {
+                debug.log('MutationObserver: Page not yet stable, waiting...');
                 return;
             }
             
@@ -1068,14 +1121,21 @@ async function downloadKeys(keys, filename, alertMessage) {
             }, 2000);
         }
         
-        // Check for anti-bot protection before proceeding
+        // Enhanced anti-bot protection detection before proceeding
         const hasAntiBot = document.body && (
             document.body.textContent.includes('PLEASE WAIT WHILE WE CHECK IF YOU ARE A HUMAN') ||
             document.body.textContent.includes('Checking your browser') ||
             document.body.textContent.includes('DDoS protection') ||
+            document.body.textContent.includes('Just a moment') ||
+            document.body.textContent.includes('Verifying you are human') ||
             document.querySelector('[class*="cf-"]') ||
             document.querySelector('[id*="cf-"]') ||
-            window.location.pathname.includes('/cdn-cgi/')
+            document.querySelector('.cf-browser-verification') ||
+            window.location.pathname.includes('/cdn-cgi/') ||
+            document.title.includes('Just a moment') ||
+            document.querySelector('script[src*="cloudflare"]') ||
+            document.querySelector('noscript') && 
+            document.querySelector('noscript').textContent.includes('Please enable JavaScript')
         );
         
         if (hasAntiBot) {
