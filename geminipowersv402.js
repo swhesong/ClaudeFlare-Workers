@@ -29,6 +29,10 @@ const CONFIG = {
   cache_busting_mode: "TIMESTAMP", // "TIMESTAMP" or "UUID"
   cache_busting_position: "SUFFIX", // "PREFIX" or "SUFFIX"
   
+  // NEW: User-side reminder prompt injection(GAT)
+  enable_reminder_prompt: true,
+  reminder_prompt_text: `\n\n[SYSTEM REMINDER] The FINAL OUTPUT PROTOCOL is still in effect. You MUST end your entire response with the literal string '${ABSOLUTE_FINISH_TOKEN}'. This is a non-negotiable, critical requirement.`,
+  
   // REPLACEMENT 1: Enhanced retry_prompt with detailed examples
   retry_prompt: `# [SYSTEM INSTRUCTION: PRECISION CONTINUATION PROTOCOL]
 
@@ -1173,7 +1177,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
   let functionCallModeActive = false; // <<< New state variable
   let heartbeatInterval = null; // ✨ New: heartbeat timer variable
 
-  // ✅ NEW: Lookahead buffer mechanism inspired by Project B for ultimate token safety
+  // ✅ NEW: Lookahead buffer mechanism for ultimate token safety
   const LOOKAHEAD_SIZE = ABSOLUTE_FINISH_TOKEN.length + 5;
   let lookaheadTextBuffer = ""; // Accumulates text content for lookahead logic
   let lookaheadLinesBuffer = []; // Accumulates original SSE lines corresponding to the text buffer
@@ -1282,7 +1286,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
 
               logDebug(`[HEARTBEAT] Sending SSE heartbeat #${heartbeatCount} (uptime: ${uptime}s)`);
             
-            // Enhanced Dynamic Heartbeat Logic - Inspired by Project B's client compatibility approach
+            // Enhanced Dynamic Heartbeat Logic -client compatibility approach
             // Dynamically adjusts heartbeat payload structure based on current generation phase
             // and client capabilities to prevent UI flickering in sensitive clients
             
@@ -1448,7 +1452,7 @@ async function processStreamAndRetryInternally({ initialReader, writer, original
               }
           }
           
-          // NEW: Enhanced client compatibility fix inspired by Project B.
+          // NEW: Enhanced client compatibility fix
           // If a data chunk contains ONLY thoughts and no formal text, Gemini might incorrectly add a "finishReason".
           // Some clients (like Cherry Studio) will prematurely stop rendering upon seeing any finishReason.
           // This logic removes the premature finishReason from thought-only chunks to ensure client compatibility.
@@ -2034,7 +2038,20 @@ async function handleStreamingPost(request) {
       }
   }
   // ============================================
-  
+
+  // ============ New: Inject user-side reminder prompt
+  if (CONFIG.enable_reminder_prompt && rawBody && Array.isArray(rawBody.contents) && rawBody.contents.length > 1) { // Only inject if there's history
+    const lastContent = rawBody.contents[rawBody.contents.length - 1];
+    // Ensure the last message is from the user and has parts to append to.
+    if (lastContent.role === "user" && Array.isArray(lastContent.parts) && lastContent.parts.length > 0) {
+      const lastPart = lastContent.parts[lastContent.parts.length - 1];
+      if (lastPart.text) {
+        lastPart.text += CONFIG.reminder_prompt_text;
+        logInfo(`[Request-ID: ${requestId}] Injected user-side reminder prompt to reinforce finish token rule.`);
+      }
+    }
+  }
+  // =======================================================================
   
   // Enhanced structured output detection with preservation of core functionality
   const isStructuredOutput = rawBody?.generationConfig?.response_mime_type?.startsWith('application/json') || 
